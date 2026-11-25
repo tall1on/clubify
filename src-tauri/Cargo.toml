@@ -1,6 +1,6 @@
 [package]
 name = "clubify"
-version = "0.2.2"
+version = "0.2.3"
 description = "Spotify-only nightclub DSP for Windows"
 authors = ["Luke Grandke"]
 license = "GPL-3.0"

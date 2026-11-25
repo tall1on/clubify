@@ -11,10 +11,8 @@ export class EarlyReflections {
   private readonly rightGains: Float32Array;
   private readonly dampingStates: Float32Array;
   private readonly dampingCoefficient: number;
-  private readonly sampleRate: number;
 
   constructor(sampleRate: number) {
-    this.sampleRate = sampleRate;
     const delays = TAP_TIMES_MS.map((ms) =>
       Math.max(1, Math.round((ms / 1_000) * sampleRate)),
     );
@@ -39,10 +37,6 @@ export class EarlyReflections {
     this.buffer.fill(0);
     this.dampingStates.fill(0);
     this.writeIndex = 0;
-  }
-
-  get sampleRateHz(): number {
-    return this.sampleRate;
   }
 
   process(

@@ -33,6 +33,10 @@ export class DspChain {
   private readonly limiter: Limiter;
   private readonly dryLeft: Float32Array;
   private readonly dryRight: Float32Array;
+  private readonly dryDelayLeft: Float32Array;
+  private readonly dryDelayRight: Float32Array;
+  private dryDelayIndex = 0;
+  private readonly latency: number;
   private readonly sendLeft: Float32Array;
   private readonly sendRight: Float32Array;
   private readonly earlyLeft: Float32Array;
@@ -76,6 +80,9 @@ export class DspChain {
     this.limiter = new Limiter(sampleRate);
     this.dryLeft = new Float32Array(maxBlockFrames);
     this.dryRight = new Float32Array(maxBlockFrames);
+    this.latency = this.limiter.lookaheadFrames;
+    this.dryDelayLeft = new Float32Array(this.latency);
+    this.dryDelayRight = new Float32Array(this.latency);
     this.sendLeft = new Float32Array(maxBlockFrames);
     this.sendRight = new Float32Array(maxBlockFrames);
     this.earlyLeft = new Float32Array(maxBlockFrames);
@@ -98,6 +105,10 @@ export class DspChain {
     this.params = params;
   }
 
+  get latencyFrames(): number {
+    return this.latency;
+  }
+
   reset(): void {
     this.highPassFilter.reset();
     this.bassShelf.reset();
@@ -113,6 +124,9 @@ export class DspChain {
     this.earlyReflections.reset();
     this.reverb.reset();
     this.limiter.reset();
+    this.dryDelayLeft.fill(0);
+    this.dryDelayRight.fill(0);
+    this.dryDelayIndex = 0;
     this.duckState = 0;
     this.duckEnvelope = 0;
   }
@@ -121,8 +135,13 @@ export class DspChain {
     if (length <= 0) return;
     const frames = Math.min(length, this.dryLeft.length);
     for (let index = 0; index < frames; index += 1) {
-      this.dryLeft[index] = left[index]!;
-      this.dryRight[index] = right[index]!;
+      const slot = this.dryDelayIndex;
+      this.dryLeft[index] = this.dryDelayLeft[slot]!;
+      this.dryRight[index] = this.dryDelayRight[slot]!;
+      this.dryDelayLeft[slot] = left[index]!;
+      this.dryDelayRight[slot] = right[index]!;
+      this.dryDelayIndex += 1;
+      if (this.dryDelayIndex >= this.latency) this.dryDelayIndex = 0;
     }
 
     this.updateSmoothedValues(SMOOTHING);
@@ -282,7 +301,10 @@ export class DspChain {
   }
 
   private applyBlockParameters(): void {
-    const airCutoff = Math.max(3_000, this.smoothAirDampingHz * (1 - 0.45 * this.smoothDistance));
+    const airCutoff = Math.min(
+      this.sampleRate * 0.45,
+      Math.max(3_000, this.smoothAirDampingHz * (1 - 0.45 * this.smoothDistance)),
+    );
     this.bassShelf.setCoefficients(
       lowShelf(
         this.sampleRate,

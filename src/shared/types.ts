@@ -1,12 +1,15 @@
-export const SAMPLE_RATE = 48_000;
+export const DEFAULT_SAMPLE_RATE = 48_000;
 export const CHANNELS = 2;
-export const CAPTURE_BYTES_PER_SAMPLE = 2;
-export const CAPTURE_FRAME_BYTES = CHANNELS * CAPTURE_BYTES_PER_SAMPLE;
+export const CAPTURE_S16_BYTES_PER_SAMPLE = 2;
+export const CAPTURE_S16_FRAME_BYTES = CHANNELS * CAPTURE_S16_BYTES_PER_SAMPLE;
+export const CAPTURE_F32_FRAME_BYTES = CHANNELS * 4;
 export const OUTPUT_BYTES_PER_SAMPLE = 4;
 export const OUTPUT_FRAME_BYTES = CHANNELS * OUTPUT_BYTES_PER_SAMPLE;
 export const DSP_BLOCK_FRAMES = 256;
-export const OUTPUT_BLOCK_FRAMES = 480;
+export const OUTPUT_BLOCK_MS = 10;
 export const MAX_AUTO_GAIN_DB = 12;
+
+export type CaptureFormat = "f32" | "s16";
 
 export const MIN_BUFFER_MS = 16;
 export const MAX_BUFFER_MS = 240;
@@ -83,6 +86,8 @@ export interface EngineStatus {
   outputActive: boolean;
   outputDeviceName: string | null;
   sampleRate: number;
+  captureSampleRate: number;
+  captureFormat: CaptureFormat;
   bufferMs: number;
   targetBufferMs: number;
   level: AudioLevel;

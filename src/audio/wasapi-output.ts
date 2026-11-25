@@ -2,9 +2,9 @@ import { createRequire } from "node:module";
 import type { RtAudio as RtAudioInstance } from "audify";
 import {
   CHANNELS,
-  OUTPUT_BLOCK_FRAMES,
+  DEFAULT_SAMPLE_RATE,
+  OUTPUT_BLOCK_MS,
   OUTPUT_BYTES_PER_SAMPLE,
-  SAMPLE_RATE,
   type OutputDevice,
 } from "../shared/types.js";
 import { silentPcm } from "./pcm.js";
@@ -24,14 +24,15 @@ export interface OpenOutputResult {
   device: OutputDevice;
   warning: string | null;
   frameSize: number;
+  sampleRate: number;
 }
 
 export class WasapiOutput {
   private rt: RtAudioInstance | null = null;
   private running = false;
-  private frameSize = OUTPUT_BLOCK_FRAMES;
+  private frameSize = Math.round((DEFAULT_SAMPLE_RATE * OUTPUT_BLOCK_MS) / 1_000);
   private silentFrame: Buffer = Buffer.alloc(
-    OUTPUT_BLOCK_FRAMES * CHANNELS * OUTPUT_BYTES_PER_SAMPLE,
+    this.frameSize * CHANNELS * OUTPUT_BYTES_PER_SAMPLE,
   );
   private errorHandler: ((message: string) => void) | null = null;
 
@@ -57,13 +58,80 @@ export class WasapiOutput {
     }
   }
 
+  preferredRate(deviceName: string | null): number {
+    const rt = new RtAudio(WASAPI_API);
+    try {
+      const { device } = this.pickDevice(rt, deviceName);
+      return validRate(device.preferredSampleRate);
+    } catch {
+      return DEFAULT_SAMPLE_RATE;
+    } finally {
+      try {
+        if (rt.isStreamOpen()) rt.closeStream();
+      } catch {
+        // no stream was opened by this probe
+      }
+    }
+  }
+
   open(
     deviceName: string | null,
+    sampleRate: number,
     onFrame: (frames: number) => Buffer,
     onError: (message: string) => void,
   ): OpenOutputResult {
     this.stop();
     const rt = new RtAudio(WASAPI_API);
+    const { device, warning, defaultId } = this.pickDevice(rt, deviceName);
+    const frameSize = Math.max(1, Math.round((sampleRate * OUTPUT_BLOCK_MS) / 1_000));
+    this.silentFrame = silentPcm(frameSize);
+    const actualFrameSize = rt.openStream(
+      { deviceId: device.id, nChannels: 2, firstChannel: 0 },
+      null,
+      FLOAT32_FORMAT,
+      sampleRate,
+      frameSize,
+      "clubify",
+      null,
+      () => this.pullFrame(onFrame),
+      STREAM_FLAGS,
+      (_type: number, message: string) => {
+        if (_type <= 1) return;
+        this.errorHandler?.(`${message} (type ${_type})`);
+      },
+    );
+    this.rt = rt;
+    this.frameSize = actualFrameSize > 0 ? actualFrameSize : frameSize;
+    this.silentFrame = silentPcm(this.frameSize);
+    this.errorHandler = onError;
+    this.running = true;
+    const reportedRate = rt.getStreamSampleRate();
+    const actualRate =
+      Number.isFinite(reportedRate) && reportedRate >= 8_000
+        ? Math.round(reportedRate)
+        : sampleRate;
+    rt.write(this.silentFrame);
+    rt.write(this.silentFrame);
+    rt.write(this.silentFrame);
+    rt.start();
+    return {
+      device: {
+        id: device.id,
+        name: device.name,
+        isDefault: device.id === defaultId,
+        outputChannels: device.outputChannels,
+        preferredSampleRate: device.preferredSampleRate,
+      },
+      warning,
+      frameSize: this.frameSize,
+      sampleRate: actualRate,
+    };
+  }
+
+  private pickDevice(
+    rt: RtAudioInstance,
+    deviceName: string | null,
+  ): { device: AudifyDevice; warning: string | null; defaultId: number } {
     const devices = rt.getDevices().filter((device: AudifyDevice) => device.outputChannels > 0);
     if (devices.length === 0) {
       throw new Error("No WASAPI output devices are available");
@@ -81,43 +149,7 @@ export class WasapiOutput {
       device =
         devices.find((candidate: AudifyDevice) => candidate.id === defaultId) ?? devices[0]!;
     }
-    const frameSize = OUTPUT_BLOCK_FRAMES;
-    this.silentFrame = silentPcm(frameSize);
-    const actualFrameSize = rt.openStream(
-      { deviceId: device.id, nChannels: 2, firstChannel: 0 },
-      null,
-      FLOAT32_FORMAT,
-      SAMPLE_RATE,
-      frameSize,
-      "clubify",
-      null,
-      () => this.pullFrame(onFrame),
-      STREAM_FLAGS,
-      (_type: number, message: string) => {
-        if (_type <= 1) return;
-        this.errorHandler?.(`${message} (type ${_type})`);
-      },
-    );
-    this.rt = rt;
-    this.frameSize = actualFrameSize > 0 ? actualFrameSize : frameSize;
-    this.silentFrame = silentPcm(this.frameSize);
-    this.errorHandler = onError;
-    this.running = true;
-    rt.write(this.silentFrame);
-    rt.write(this.silentFrame);
-    rt.write(this.silentFrame);
-    rt.start();
-    return {
-      device: {
-        id: device.id,
-        name: device.name,
-        isDefault: device.id === defaultId,
-        outputChannels: device.outputChannels,
-        preferredSampleRate: device.preferredSampleRate,
-      },
-      warning,
-      frameSize: this.frameSize,
-    };
+    return { device, warning, defaultId };
   }
 
   private pullFrame(onFrame: (frames: number) => Buffer): void {
@@ -147,4 +179,10 @@ export class WasapiOutput {
       // ignore driver teardown errors
     }
   }
+}
+
+function validRate(rate: number): number {
+  return Number.isFinite(rate) && rate >= 8_000 && rate <= 192_000
+    ? Math.round(rate)
+    : DEFAULT_SAMPLE_RATE;
 }

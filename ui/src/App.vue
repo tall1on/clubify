@@ -178,7 +178,7 @@ onBeforeUnmount(() => engine.disconnect());
           @change="(value) => engine.setEffects({ saturation: value })"
         />
         <RangeSlider
-          label="Club reverb"
+          label="Room level"
           :value="effects.reverbMix"
           :min="0"
           :max="1"
@@ -254,6 +254,10 @@ onBeforeUnmount(() => engine.disconnect());
         <div class="stats">
           <StatTile label="Spotify PID" :value="formatPids(status.spotifyPids)" />
           <StatTile label="Capture" :value="status.captureActive ? 'active' : 'idle'" />
+          <StatTile
+            label="Capture feed"
+            :value="`${status.captureSampleRate / 1000} kHz ${status.captureFormat}`"
+          />
           <StatTile label="Sample rate" :value="`${status.sampleRate / 1000} kHz`" />
           <StatTile
             label="Auto gain"

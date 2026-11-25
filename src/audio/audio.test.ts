@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { BlockAssembler, interleave } from "./pcm.js";
 import { PlaybackQueue } from "./playback-queue.js";
 import { parseTasklist } from "./spotify-discovery.js";
-import { CAPTURE_FRAME_BYTES } from "../shared/types.js";
+import { CAPTURE_S16_FRAME_BYTES } from "../shared/types.js";
 
 function pcm(frames: number, value: number): Buffer {
-  const buffer = Buffer.alloc(frames * CAPTURE_FRAME_BYTES);
+  const buffer = Buffer.alloc(frames * CAPTURE_S16_FRAME_BYTES);
   for (let index = 0; index < frames; index += 1) {
-    buffer.writeInt16LE(value, index * CAPTURE_FRAME_BYTES);
-    buffer.writeInt16LE(value, index * CAPTURE_FRAME_BYTES + 2);
+    buffer.writeInt16LE(value, index * CAPTURE_S16_FRAME_BYTES);
+    buffer.writeInt16LE(value, index * CAPTURE_S16_FRAME_BYTES + 2);
   }
   return buffer;
 }
@@ -40,6 +40,24 @@ describe("block assembler", () => {
     expect(captured!.left[0]).toBeCloseTo(0.5, 4);
     const output = interleave(new Float32Array([0.5, -0.5]), new Float32Array([0.25, 2]), 2);
     expect(Array.from(output)).toEqual([0.5, 0.25, -0.5, 2]);
+  });
+
+  it("reads interleaved float32 capture without conversion loss", () => {
+    const assembler = new BlockAssembler(2, "f32");
+    const buffer = Buffer.alloc(2 * 8);
+    buffer.writeFloatLE(0.25, 0);
+    buffer.writeFloatLE(-0.75, 4);
+    buffer.writeFloatLE(0.125, 8);
+    buffer.writeFloatLE(-0.5, 12);
+    let captured: { left: number[]; right: number[] } | null = null;
+    assembler.push(buffer, (left, right) => {
+      captured = { left: [...left], right: [...right] };
+    });
+    expect(captured).not.toBeNull();
+    expect(captured!.left[0]).toBe(0.25);
+    expect(captured!.right[0]).toBe(-0.75);
+    expect(captured!.left[1]).toBe(0.125);
+    expect(captured!.right[1]).toBe(-0.5);
   });
 });
 
@@ -93,6 +111,48 @@ describe("playback queue", () => {
       expect(read.data[index * 2]).toBeCloseTo(index / 1_000, 6);
       expect(read.data[index * 2 + 1]).toBeCloseTo(-index / 1_000, 6);
     }
+  });
+
+  it("preserves a 15 kHz tone through fractional drift correction", () => {
+    const queue = new PlaybackQueue();
+    const frames = 4_800;
+    const samples = new Float32Array(frames * 2);
+    for (let index = 0; index < frames; index += 1) {
+      const sample = Math.sin((2 * Math.PI * 15_000 * index) / 48_000) * 0.5;
+      samples[index * 2] = sample;
+      samples[index * 2 + 1] = sample;
+    }
+    queue.push(samples);
+    const read = queue.read(2_000, 1.0005);
+    expect(read.missingFrames).toBe(0);
+    const power = (data: Float32Array, startFrame: number, endFrame: number) => {
+      let sum = 0;
+      let count = 0;
+      for (let frame = startFrame; frame < endFrame; frame += 1) {
+        const value = data[frame * 2]!;
+        sum += value * value;
+        count += 1;
+      }
+      return Math.sqrt(sum / count);
+    };
+    const ratio = power(read.data, 100, 1_900) / power(samples, 200, 2_000);
+    expect(ratio).toBeGreaterThan(0.95);
+    expect(ratio).toBeLessThan(1.05);
+  });
+
+  it("settles back to exact grid reads", () => {
+    const queue = new PlaybackQueue();
+    queue.push(samples(9_600, 0.25));
+    queue.read(1_000, 1.0005);
+    queue.settleToUnity();
+    for (let attempt = 0; attempt < 5 && !queue.aligned; attempt += 1) {
+      const read = queue.read(1_000);
+      expect(read.missingFrames).toBe(0);
+    }
+    expect(queue.aligned).toBe(true);
+    const read = queue.read(100);
+    expect(read.missingFrames).toBe(0);
+    for (const sample of read.data) expect(sample).toBeCloseTo(0.25, 5);
   });
 
   it("grows when the queue exceeds its initial capacity", () => {

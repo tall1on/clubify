@@ -28,7 +28,23 @@ for (const name of modules) {
     console.error(`Missing runtime module: ${name}`);
     process.exit(1);
   }
-  cpSync(source, join(engine, "node_modules", name), { recursive: true });
+  const destination = join(engine, "node_modules", name);
+  if (name === "loopback-capture") {
+    const addon = join(source, "build", "Release", "loopback_capture_addon.node");
+    if (!existsSync(addon)) {
+      console.error("Missing loopback-capture native build. Run `npm run build:capture`.");
+      process.exit(1);
+    }
+    mkdirSync(destination, { recursive: true });
+    for (const part of ["dist", "build", "package.json", "LICENSE"]) {
+      cpSync(join(source, part), join(destination, part), {
+        recursive: true,
+        dereference: true,
+      });
+    }
+    continue;
+  }
+  cpSync(source, destination, { recursive: true, dereference: true });
 }
 
 const nodeLicense = join(dirname(process.execPath), "LICENSE");

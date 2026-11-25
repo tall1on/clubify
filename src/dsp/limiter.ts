@@ -28,6 +28,10 @@ export class Limiter {
     this.releaseCoefficient = 1 - Math.exp(-1 / (RELEASE_SECONDS * sampleRate));
   }
 
+  get lookaheadFrames(): number {
+    return this.lookahead;
+  }
+
   reset(): void {
     this.delayLeft.fill(0);
     this.delayRight.fill(0);

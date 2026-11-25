@@ -13,6 +13,7 @@ import {
   clampParams,
   defaultEffects,
   getPreset,
+  neutralEffects,
 } from "../shared/presets.js";
 
 const SR = 48_000;
@@ -205,12 +206,25 @@ describe("presets", () => {
     expect(getPreset(DEFAULT_PRESET_ID)).toBeDefined();
     expect(defaultEffects()).toEqual(getPreset(DEFAULT_PRESET_ID)!.params);
   });
+
+  it("uses neutral values for new fields in old custom configs", () => {
+    const neutral = neutralEffects();
+    expect(neutral.width).toBe(1);
+    expect(neutral.distance).toBe(0);
+    expect(neutral.lowMidCutDb).toBe(0);
+    expect(neutral.presenceDb).toBe(0);
+    expect(neutral.airDampingHz).toBe(20_000);
+    expect(neutral.earlyReflections).toBe(0);
+    expect(neutral.reverbDuck).toBe(0);
+  });
 });
 
 describe("chain", () => {
   it("passes the dry signal through untouched when bypassed", () => {
     const params = { ...PRESETS[0]!.params, effectsEnabled: false };
     const chain = new DspChain(SR, params, 256);
+    const latency = chain.latencyFrames;
+    expect(latency).toBeGreaterThan(0);
     const sourceLeft = new Float32Array(256);
     const sourceRight = new Float32Array(256);
     for (let index = 0; index < 256; index += 1) {
@@ -221,8 +235,13 @@ describe("chain", () => {
     const right = sourceRight.slice();
     chain.processBlock(left, right, 256);
     for (let index = 0; index < 256; index += 1) {
-      expect(left[index]).toBeCloseTo(sourceLeft[index]!, 6);
-      expect(right[index]).toBeCloseTo(sourceRight[index]!, 6);
+      if (index < latency) {
+        expect(left[index]).toBe(0);
+        expect(right[index]).toBe(0);
+      } else {
+        expect(left[index]).toBeCloseTo(sourceLeft[index - latency]!, 6);
+        expect(right[index]).toBeCloseTo(sourceRight[index - latency]!, 6);
+      }
     }
   });
 
@@ -247,6 +266,31 @@ describe("chain", () => {
       expect(Number.isFinite(right[index])).toBe(true);
       expect(Math.abs(left[index]!)).toBeLessThanOrEqual(1.0001);
       expect(Math.abs(right[index]!)).toBeLessThanOrEqual(1.0001);
+    }
+  });
+
+  it("runs at 44.1 and 96 kHz with a bounded limiter", () => {
+    for (const rate of [44_100, 96_000]) {
+      const chain = new DspChain(rate, PRESETS[0]!.params, 256);
+      const left = new Float32Array(256);
+      const right = new Float32Array(256);
+      let maxPeak = 0;
+      let finite = true;
+      for (let block = 0; block < 300; block += 1) {
+        for (let index = 0; index < 256; index += 1) {
+          const sample = Math.sin((2 * Math.PI * 1_000 * (block * 256 + index)) / rate) * 0.6;
+          left[index] = sample;
+          right[index] = sample;
+        }
+        chain.processBlock(left, right, 256);
+        for (let index = 0; index < 256; index += 1) {
+          if (!Number.isFinite(left[index]) || !Number.isFinite(right[index])) finite = false;
+          maxPeak = Math.max(maxPeak, Math.abs(left[index]!), Math.abs(right[index]!));
+        }
+      }
+      expect(finite).toBe(true);
+      expect(maxPeak).toBeLessThanOrEqual(1.0001);
+      expect(chain.latencyFrames).toBeGreaterThan(0);
     }
   });
 

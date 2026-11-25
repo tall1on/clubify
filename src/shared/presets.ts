@@ -14,7 +14,7 @@ const base: DspParams = {
   distance: 0.35,
   saturation: 0.28,
   compression: 0.45,
-  thresholdDb: -20,
+  thresholdDb: -26,
   ratio: 3.5,
   earlyReflections: 0.35,
   reverbMix: 0.3,
@@ -45,7 +45,7 @@ export const PRESETS: Preset[] = [
       earlyReflections: 0.5,
       saturation: 0.25,
       compression: 0.4,
-      thresholdDb: -18,
+      thresholdDb: -24,
       ratio: 3,
       reverbMix: 0.42,
       reverbSize: 0.55,
@@ -81,7 +81,7 @@ export const PRESETS: Preset[] = [
       earlyReflections: 0.45,
       saturation: 0.2,
       compression: 0.38,
-      thresholdDb: -22,
+      thresholdDb: -28,
       ratio: 3,
       reverbMix: 0.4,
       reverbSize: 0.72,
@@ -110,7 +110,7 @@ export const PRESETS: Preset[] = [
       earlyReflections: 0.25,
       saturation: 0.45,
       compression: 0.65,
-      thresholdDb: -24,
+      thresholdDb: -30,
       ratio: 5,
       reverbMix: 0.2,
       reverbSize: 0.45,
@@ -139,7 +139,7 @@ export const PRESETS: Preset[] = [
       earlyReflections: 0.7,
       saturation: 0.5,
       compression: 0.55,
-      thresholdDb: -24,
+      thresholdDb: -30,
       ratio: 4,
       reverbMix: 0.55,
       reverbSize: 0.85,
@@ -182,6 +182,23 @@ export function getPreset(id: string): Preset | undefined {
 export function defaultEffects(): DspParams {
   const preset = getPreset(DEFAULT_PRESET_ID) ?? PRESETS[0]!;
   return { ...preset.params };
+}
+
+/** Neutral values for parameters introduced after a custom config was saved. */
+export function neutralEffects(): DspParams {
+  return {
+    ...base,
+    lowMidCutDb: 0,
+    lowMidFrequency: 350,
+    presenceDb: 0,
+    presenceFrequency: 1_800,
+    airDampingHz: 20_000,
+    width: 1,
+    distance: 0,
+    earlyReflections: 0,
+    reverbPredelayMs: 20,
+    reverbDuck: 0,
+  };
 }
 
 export function clampParams(params: DspParams): DspParams {

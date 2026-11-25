@@ -1,0 +1,91 @@
+{
+  "name": "loopback-capture",
+  "version": "5.0.0-clubify.1",
+  "keywords": [
+    "audio",
+    "audio-capture",
+    "child-process",
+    "linux",
+    "loopback",
+    "low-level",
+    "napi",
+    "native",
+    "nodejs",
+    "pcm",
+    "per-process",
+    "pipewire",
+    "rust",
+    "sound",
+    "system-audio",
+    "wasapi",
+    "windows",
+    "windows-audio"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Matin Tat",
+    "email": "matin.tat85@gmail.com",
+    "url": "https://github.com/WerdoxDev/loopback-capture"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WerdoxDev/loopback-capture"
+  },
+  "binary": {
+    "napi_versions": [
+      9
+    ]
+  },
+  "files": [
+    "dist",
+    "build",
+    "prebuilds",
+    "scripts/verify-prebuilds.mjs",
+    "scripts/build-native.mjs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "src"
+  ],
+  "os": [
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "default": "./dist/index.mjs",
+        "types": "./dist/index.d.mts"
+      },
+      "require": {
+        "default": "./dist/index.cjs",
+        "types": "./dist/index.d.cts"
+      }
+    },
+    "./prebuilds/*/loopback_capture_addon.node": "./prebuilds/*/loopback_capture_addon.node",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build:native": "node scripts/build-native.mjs",
+    "compile": "node scripts/build-native.mjs",
+    "clean": "node scripts/build-native.mjs --clean",
+    "build": "node scripts/build-native.mjs",
+    "test:rust": "cargo test --locked",
+    "test:windows": "node --test scripts/test-windows-api.mjs",
+    "test:linux": "node --test scripts/test-linux-api.mjs",
+    "test:windows:audio": "node --test scripts/test-windows-audio.mjs"
+  },
+  "dependencies": {
+    "bindings": "^1.5.0"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  }
+}

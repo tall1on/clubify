@@ -7,9 +7,10 @@ Spotify-only nightclub processing for Windows. Clubify captures only the Spotify
 ## What it does
 
 - Captures `Spotify.exe` and its descendants through WASAPI process loopback.
-- 48 kHz stereo capture, fixed-size DSP blocks, float32 WASAPI output, and a drift-corrected jitter queue.
+- 32-bit float stereo capture at the output device's sample rate, fixed-size DSP blocks, float32 WASAPI output, and a drift-corrected sinc jitter queue.
 - PA-style tone shaping (sub peak, low-mid scoop, presence horn, air damping), low-band ADAA saturation, early reflections, an FDN room reverb with predelay and ducking, stereo width, distance macro, RMS compressor, lookahead limiter, and auto level.
 - Six room presets plus live fine tuning and click-free bypass.
+- 24-bit / 44.1 kHz Spotify Lossless is carried through as float32 without a bit-depth cut and without a clubify-side sample-rate conversion when the cable and output device share a rate.
 - Automatic Spotify process discovery and capture restart.
 - Tauri tray app, close-to-tray, and Windows autostart in release builds.
 - Browser control UI is also available for development.
@@ -20,6 +21,7 @@ Spotify-only nightclub processing for Windows. Clubify captures only the Spotify
 - Node.js 20 or newer.
 - A virtual audio cable such as VB-CABLE, or any unused output endpoint you can route Spotify to.
 - For desktop builds only: Rust, Cargo, and the Visual C++ build tools plus Windows SDK.
+- Rebuilding the bundled capture fork requires Rust 1.88+ and the Windows SDK. A prebuilt Windows x64 addon is committed, so normal installs do not need Rust.
 
 ## Why a virtual cable is required
 
@@ -44,6 +46,12 @@ npm run engine
 ```
 
 Open http://127.0.0.1:8787. The engine serves the built UI and exposes a localhost-only WebSocket control channel.
+
+`npm install` uses the vendored capture fork in `vendor/loopback-capture`. A prebuilt `win32-x64` addon is included. If it is missing or you changed the Rust source, rebuild it with:
+
+```powershell
+npm run build:capture
+```
 
 For frontend development with hot reload:
 
@@ -93,7 +101,7 @@ Presets:
 - **Warehouse** — dirty saturation and a large concrete tail.
 - **Clean** — captured signal with effects bypassed.
 
-Main controls: bass, saturation, club reverb, room distance, compression, output gain, preset selection, bypass.
+Main controls: bass, saturation, room level, room distance, compression, output gain, preset selection, bypass.
 
 Fine tuning: input trim, bass corner, low-mid scoop and frequency, PA presence and frequency, air damping, stereo width, early reflections, reverb size, damping, predelay and ducking, compressor threshold and ratio, safety buffer, auto level, output device.
 
@@ -101,18 +109,37 @@ Auto level slowly normalizes quiet captures toward a music-ready level. It is on
 
 The safety buffer defaults to 48 ms. It can be raised if the machine underruns and lowered for lower latency. The reported buffer is the jitter queue; total latency also includes capture, DSP, and WASAPI output.
 
+## Lossless setup
+
+For the cleanest Spotify Lossless path:
+
+1. Set Spotify to **Lossless**, volume **100%**, normalization **Normal** or off, and disable its equalizer.
+2. Open Windows **Settings -> System -> Sound**.
+3. Set **CABLE Input** (the Spotify output) to the same rate as your headphones, for example **24-bit, 44100 Hz**.
+4. Set the headphones/speakers device to the same rate, for example **24-bit, 44100 Hz**.
+5. Disable audio enhancements on both devices.
+6. Start Clubify; the UI shows the engine rate and the capture feed (`f32`).
+7. For a bit-transparent check, select **Clean** or bypass; auto level is not applied while effects are off.
+
+When both devices are 44.1 kHz, Spotify's 24-bit / 44.1 kHz stream stays at 44.1 kHz through Windows and the capture fork, into the float32 DSP. No clubify-side resample is inserted.
+
 ## Architecture
 
 ```text
-Spotify.exe
+Spotify.exe (FLAC 24-bit / 44.1 kHz, decoded by Spotify)
    |
-   |  Windows Process Loopback (include process tree)
+   |  Windows audio engine, float32 at the cable endpoint rate
    v
-loopback-capture (Rust N-API addon)
+Windows Process Loopback (include process tree)
    |
-   |  16-bit stereo PCM @ 48 kHz
    v
-Block assembler -> float32 DSP chain -> drift-corrected jitter queue
+vendor/loopback-capture (Rust N-API fork)
+   |
+   |  float32 stereo at the engine rate
+   |  AUTOCONVERTPCM + SRC_DEFAULT_QUALITY
+   |  silent packets delivered as zeros
+   v
+Block assembler -> float32 DSP chain -> sinc drift queue (unity deadband)
                                                     |
                                                     v
                                     audify / WASAPI float32 render
@@ -123,6 +150,8 @@ Block assembler -> float32 DSP chain -> drift-corrected jitter queue
 Tauri app --tray/autostart--> spawns Node engine
 Browser or WebView UI <--WebSocket--> engine control server
 ```
+
+The engine follows the selected output device's preferred sample rate. Capture requests that same rate and format, so with the cable and output device both set to the same rate the path does no sample-rate conversion at all. The drift queue only corrects clock mismatch between the two devices, using a 32-tap windowed-sinc interpolator and staying on exactly 1.0 while the buffer is within its deadband.
 
 Project layout:
 
@@ -135,6 +164,7 @@ src/
 ui/             Vue 3 + Pinia + Vite control UI
 src-tauri/      Tauri 2 shell, tray menu, autostart, engine lifecycle
 scripts/        production engine packaging
+vendor/         vendored loopback-capture fork (Rust) and its prebuilt addon
 ```
 
 ## Configuration
@@ -172,10 +202,12 @@ npm test
 npm run typecheck
 npm run ui:typecheck
 npm run ui:build
+npm run build:capture
+cargo check --manifest-path vendor/loopback-capture/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-The audio smoke test can also be exercised without Spotify by creating a process named `Spotify.exe` that renders a tone, but it will be audible. End-to-end testing with a synthetic process produced a stable 35–40 ms queue with zero underruns on the development machine.
+`npm run build:capture` rebuilds the vendored native addon and updates `vendor/loopback-capture/build/Release/loopback_capture_addon.node`. The audio smoke test can also be exercised without Spotify by creating a process named `Spotify.exe` that renders a tone, but it will be audible. End-to-end testing with a synthetic process produced a stable 35–40 ms queue with zero underruns on the development machine.
 
 ## Troubleshooting
 
@@ -199,9 +231,17 @@ Auto level adapts slowly by design. Use input trim for manual gain and output ga
 
 Raise the safety buffer, close CPU-heavy applications, or choose a different output device. The engine drops data rather than growing latency without bound; the overrun counter records that. Clock drift between the capture and output device is absorbed by a small playback-ratio correction instead of by trimming.
 
-**Lossless Spotify sounds slightly gritty or distorted**
+**Lossless Spotify sounds gritty, dull, or distorted**
 
-Set Spotify's volume to 100% and control loudness in Clubify, set Spotify normalization to *Normal* or off (the *Loud* setting applies its own limiter), and disable Spotify's equalizer. In Windows, set the output device and the virtual cable to the same format (for example 48 kHz / 24-bit) and disable audio enhancements on the output device. The DSP chain now reserves headroom, limits with 3 ms of lookahead, and saturates only the low band, but the capture dependency still delivers 16-bit audio at 48 kHz.
+Set Spotify's volume to 100% and control loudness in Clubify, set Spotify normalization to *Normal* or off (the *Loud* setting applies its own limiter), and disable Spotify's equalizer. Set the virtual cable and the output device to the same sample rate and disable audio enhancements on both. The DSP chain reserves headroom, limits with 3 ms of lookahead, and saturates only the low band. In Clean or bypass, auto level is skipped so the captured signal is passed through float32 without gain changes.
+
+**The engine reports "bundled loopback-capture fork is required"**
+
+The patched addon is missing. Run `npm run build:capture`, then `npm install` again if `node_modules` still points at the upstream package.
+
+**The UI shows different capture and engine rates**
+
+The engine follows the output device, and capture requests the same rate. If the capture rate differs, the cable endpoint rejected the requested format; set the cable and output device to the same rate in Windows Sound settings and restart Clubify.
 
 **Desktop window is not visible**
 
@@ -216,15 +256,16 @@ Install the Rust toolchain and the Visual Studio C++ build tools with the Window
 - Windows x64 only for the supported capture path.
 - Original audio suppression depends on routing Spotify to a virtual/silent endpoint.
 - Spotify is detected by process image name, not the Spotify Web API. No login or account access is involved.
-- Output is float32 at 48 kHz stereo. Devices that cannot open 48 kHz in shared mode are not resampled yet.
-- Capture is limited to 16-bit 48 kHz by `loopback-capture`, which hard-codes PCM16 with `AUTOCONVERTPCM` and no `AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY`. For fully transparent capture, fork the addon to request 32-bit float through `WAVEFORMATEXTENSIBLE` and add that stream flag, then update `BlockAssembler` to read floats.
+- Output is float32 stereo at the output device's preferred rate. Devices that cannot open that rate in shared mode fall back to 48 kHz and are resampled by Windows.
+- Capture uses the vendored `loopback-capture` fork in `vendor/loopback-capture`. It is pinned; upstream changes need to be merged manually. Rebuild it with `npm run build:capture` after changing the Rust source.
+- Spotify's normalized loudness is applied before capture. Clubify cannot recover peaks removed by Spotify's *Loud* limiter, so use *Normal* or off for lossless listening.
 - Total latency is typically above the 30 ms target because of shared-mode WASAPI, the virtual cable, the jitter queue, and the limiter lookahead. Lower the safety buffer to trade stability for latency.
 - The control server has no authentication because it binds to localhost. Do not expose port 8787.
 - The production package bundles Node and therefore is substantially larger than a pure Rust Tauri app.
 
 ## Third-party components
 
-- [loopback-capture](https://github.com/WerdoxDev/loopback-capture) — MIT, wasapi process/system loopback N-API addon.
+- [loopback-capture](https://github.com/WerdoxDev/loopback-capture) — MIT, vendored fork under `vendor/loopback-capture`; adds float32 capture, an explicit sample rate, `SRC_DEFAULT_QUALITY`, and silence-preserving delivery.
 - [audify](https://github.com/almoghamdani/audify) — MIT, RtAudio/WASAPI output and Opus bindings.
 - [Tauri](https://tauri.app) — Apache-2.0/MIT.
 - Node.js runtime (MIT) is bundled in production builds.

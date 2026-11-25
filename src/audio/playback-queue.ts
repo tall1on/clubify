@@ -1,5 +1,11 @@
-const DEFAULT_CAPACITY_FRAMES = 96_000;
+const DEFAULT_CAPACITY_FRAMES = 192_000;
 const CHANNELS = 2;
+const KERNEL_TAPS = 32;
+const KERNEL_PHASES = 256;
+const KERNEL_OFFSET = 15;
+const KERNEL_HALF_WIDTH = 16;
+
+const KERNELS = buildKernels();
 
 export interface QueueRead {
   data: Float32Array;
@@ -12,6 +18,7 @@ export class PlaybackQueue {
   private startFrame = 0;
   private availableFrames = 0;
   private fraction = 0;
+  private settling = false;
 
   constructor(capacityFrames = DEFAULT_CAPACITY_FRAMES) {
     this.capacityFrames = capacityFrames;
@@ -40,35 +47,78 @@ export class PlaybackQueue {
     this.availableFrames += frames;
   }
 
+  pushInterleaved(left: Float32Array, right: Float32Array, frames: number): void {
+    if (frames <= 0) return;
+    this.ensureCapacity(this.availableFrames + frames);
+    let writeFrame = (this.startFrame + this.availableFrames) % this.capacityFrames;
+    for (let frame = 0; frame < frames; frame += 1) {
+      const destination = writeFrame * CHANNELS;
+      this.buffer[destination] = left[frame]!;
+      this.buffer[destination + 1] = right[frame]!;
+      writeFrame += 1;
+      if (writeFrame >= this.capacityFrames) writeFrame = 0;
+    }
+    this.availableFrames += frames;
+  }
+
   read(frames: number, ratio = 1): QueueRead {
-    const sampleCount = frames * CHANNELS;
-    const output = new Float32Array(sampleCount);
-    const required = Math.ceil((frames - 1) * ratio) + 1;
+    if (ratio !== 1) this.settling = false;
+    const effectiveRatio = this.settling && ratio === 1 ? 0.9995 : ratio;
+    const output = new Float32Array(frames * CHANNELS);
+    if (effectiveRatio === 1 && this.fraction === 0) {
+      if (frames > this.availableFrames) {
+        return { data: output, missingFrames: frames };
+      }
+      for (let frame = 0; frame < frames; frame += 1) {
+        const source = ((this.startFrame + frame) % this.capacityFrames) * CHANNELS;
+        output[frame * CHANNELS] = this.buffer[source]!;
+        output[frame * CHANNELS + 1] = this.buffer[source + 1]!;
+      }
+      this.startFrame = (this.startFrame + frames) % this.capacityFrames;
+      this.availableFrames -= frames;
+      return { data: output, missingFrames: 0 };
+    }
+
+    const required = Math.ceil((frames - 1) * effectiveRatio) + KERNEL_HALF_WIDTH + 2;
     if (required > this.availableFrames) {
       return { data: output, missingFrames: frames };
     }
 
     for (let frame = 0; frame < frames; frame += 1) {
       const base = Math.floor(this.fraction);
-      const t = this.fraction - base;
+      const phase = Math.floor((this.fraction - base) * KERNEL_PHASES);
+      const kernel = KERNELS[Math.min(KERNEL_PHASES - 1, phase)]!;
       const frameCount = this.availableFrames;
       for (let channel = 0; channel < CHANNELS; channel += 1) {
-        const p0 = this.sampleAt(base - 1, channel, frameCount);
-        const p1 = this.sampleAt(base, channel, frameCount);
-        const p2 = this.sampleAt(base + 1, channel, frameCount);
-        const p3 = this.sampleAt(base + 2, channel, frameCount);
-        output[frame * CHANNELS + channel] = cubic(p0, p1, p2, p3, t);
+        let sum = 0;
+        for (let tap = 0; tap < KERNEL_TAPS; tap += 1) {
+          sum += this.sampleAt(base - KERNEL_OFFSET + tap, channel, frameCount) * kernel[tap]!;
+        }
+        output[frame * CHANNELS + channel] = sum;
       }
-      this.fraction += ratio;
+      this.fraction += effectiveRatio;
       const advance = Math.floor(this.fraction);
       if (advance > 0) {
         this.startFrame = (this.startFrame + advance) % this.capacityFrames;
         this.availableFrames -= advance;
         this.fraction -= advance;
       }
+      if (this.settling && this.fraction < 1e-9) {
+        this.fraction = 0;
+        this.settling = false;
+      }
     }
 
     return { data: output, missingFrames: 0 };
+  }
+
+  /** Glides back to exact sample-grid reads after a drift correction. */
+  settleToUnity(): void {
+    this.settling = this.fraction !== 0;
+  }
+
+  get aligned(): boolean {
+    return this.fraction === 0 && !this.settling;
   }
 
   trimTo(maxFrames: number): number {
@@ -83,6 +133,7 @@ export class PlaybackQueue {
     this.startFrame = 0;
     this.availableFrames = 0;
     this.fraction = 0;
+    this.settling = false;
   }
 
   private sampleAt(offset: number, channel: number, frameCount: number): number {
@@ -110,10 +161,30 @@ export class PlaybackQueue {
   }
 }
 
-function cubic(p0: number, p1: number, p2: number, p3: number, t: number): number {
-  const a = 2 * p1;
-  const b = p2 - p0;
-  const c = 2 * p0 - 5 * p1 + 4 * p2 - p3;
-  const d = 3 * (p1 - p2) + p3 - p0;
-  return 0.5 * (a + b * t + c * t * t + d * t * t * t);
+function buildKernels(): Float32Array[] {
+  const kernels: Float32Array[] = [];
+  for (let phase = 0; phase < KERNEL_PHASES; phase += 1) {
+    const fraction = phase / KERNEL_PHASES;
+    const kernel = new Float32Array(KERNEL_TAPS);
+    let sum = 0;
+    for (let tap = 0; tap < KERNEL_TAPS; tap += 1) {
+      const distance = KERNEL_OFFSET - tap + fraction;
+      const magnitude = Math.abs(distance);
+      const sinc =
+        magnitude < 1e-9 ? 1 : Math.sin(Math.PI * distance) / (Math.PI * distance);
+      let window = 0;
+      if (magnitude < KERNEL_HALF_WIDTH) {
+        const angle = (Math.PI * distance) / KERNEL_HALF_WIDTH;
+        window = 0.42 + 0.5 * Math.cos(angle) + 0.08 * Math.cos(2 * angle);
+      }
+      const value = sinc * window;
+      kernel[tap] = value;
+      sum += value;
+    }
+    if (sum !== 0) {
+      for (let tap = 0; tap < KERNEL_TAPS; tap += 1) kernel[tap] = kernel[tap]! / sum;
+    }
+    kernels.push(kernel);
+  }
+  return kernels;
 }

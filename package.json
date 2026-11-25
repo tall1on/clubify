@@ -18,6 +18,7 @@
         "desktop:dev": "tauri dev",
         "package:engine": "npm run build && node scripts/package-engine.mjs",
         "desktop:build": "npm run package:engine && tauri build",
+        "build:capture": "node vendor/loopback-capture/scripts/build-native.mjs",
         "ui:typecheck": "node scripts/ui-typecheck.cjs -p ui/tsconfig.json --noEmit"
     },
     "engines": {
@@ -25,7 +26,7 @@
     },
     "dependencies": {
         "audify": "^1.10.1",
-        "loopback-capture": "^5.0.0",
+        "loopback-capture": "file:vendor/loopback-capture",
         "pinia": "^4.1.0",
         "vue": "^3.5.46",
         "ws": "^8.23.0"

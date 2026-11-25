@@ -6,6 +6,11 @@ const MAX_PREDELAY_MS = 60;
 const MAX_DAMPING = 0.85;
 const MAX_SIZE_SCALE = 1.3;
 const MODULATION_DEPTH_MS = 0.35;
+const DELAY_SMOOTHING = 0.001;
+const PREDELAY_SMOOTHING = 0.0006;
+const MOD_TABLE_SIZE = 2_048;
+
+const MOD_TABLE = buildModulationTable();
 
 export interface ReverbSettings {
   size: number;
@@ -20,7 +25,8 @@ class DelayLine {
   private dampState = 0;
   private feedback = 0.8;
   private dampCoefficient = 0.6;
-  private baseDelay: number;
+  private targetDelay: number;
+  private smoothedDelay: number;
   private readonly depth: number;
   private phase = 0;
   private readonly phaseIncrement: number;
@@ -28,24 +34,28 @@ class DelayLine {
   constructor(maxDelay: number, sampleRate: number, lfoHz: number) {
     this.depth = Math.max(1, Math.round((MODULATION_DEPTH_MS / 1_000) * sampleRate));
     this.buffer = new Float32Array(maxDelay + this.depth + 2);
-    this.baseDelay = maxDelay;
-    this.phaseIncrement = (2 * Math.PI * lfoHz) / sampleRate;
+    this.targetDelay = maxDelay;
+    this.smoothedDelay = maxDelay;
+    this.phaseIncrement = (lfoHz * MOD_TABLE_SIZE) / sampleRate;
   }
 
   configure(feedback: number, dampCoefficient: number, delay: number): void {
     this.feedback = feedback;
     this.dampCoefficient = dampCoefficient;
     const maxDelay = this.buffer.length - this.depth - 2;
-    this.baseDelay = Math.min(maxDelay, Math.max(1, delay));
+    this.targetDelay = Math.min(maxDelay, Math.max(1, delay));
   }
 
   read(): number {
+    this.smoothedDelay += (this.targetDelay - this.smoothedDelay) * DELAY_SMOOTHING;
     this.phase += this.phaseIncrement;
-    if (this.phase >= 2 * Math.PI) this.phase -= 2 * Math.PI;
-    const modulation = (Math.sin(this.phase) * 0.5 + 0.5) * this.depth;
+    if (this.phase >= MOD_TABLE_SIZE) this.phase -= MOD_TABLE_SIZE;
+    const modulation =
+      (MOD_TABLE[Math.floor(this.phase)]! * 0.5 + 0.5) * this.depth;
     const size = this.buffer.length;
-    let position = this.index - this.baseDelay - modulation;
+    let position = this.index - this.smoothedDelay - modulation;
     if (position < 0) position += size;
+    if (position >= size) position -= size;
     const first = Math.floor(position);
     const second = (first + 1) % size;
     const fraction = position - first;
@@ -70,6 +80,7 @@ class DelayLine {
     this.dampState = 0;
     this.index = 0;
     this.phase = 0;
+    this.smoothedDelay = this.targetDelay;
   }
 }
 
@@ -101,7 +112,8 @@ export class Reverb {
   private diffusion: Allpass[] = [];
   private predelay: Float32Array;
   private predelayIndex = 0;
-  private predelaySamples = 0;
+  private predelayTarget = 0;
+  private predelayCurrent = 0;
   private sampleRate = 0;
   private size = 0.6;
   private damping = 0.45;
@@ -121,10 +133,11 @@ export class Reverb {
       (ms) => new Allpass(Math.max(1, Math.round((ms / 1_000) * sampleRate))),
     );
     this.predelay = new Float32Array(Math.max(1, Math.round((MAX_PREDELAY_MS / 1_000) * sampleRate)));
-    this.predelaySamples = Math.min(
+    this.predelayTarget = Math.min(
       this.predelay.length - 1,
       Math.round((20 / 1_000) * sampleRate),
     );
+    this.predelayCurrent = this.predelayTarget;
     this.predelayIndex = 0;
     this.sampleRate = sampleRate;
   }
@@ -133,7 +146,7 @@ export class Reverb {
     if (settings.sampleRate !== this.sampleRate) this.build(settings.sampleRate);
     this.size = Math.min(0.95, Math.max(0.2, settings.size));
     this.damping = Math.min(1, Math.max(0, settings.damping));
-    this.predelaySamples = Math.min(
+    this.predelayTarget = Math.min(
       this.predelay.length - 1,
       Math.max(0, Math.round(((settings.predelayMs ?? 20) / 1_000) * this.sampleRate)),
     );
@@ -157,10 +170,7 @@ export class Reverb {
     for (const allpass of this.diffusion) allpass.reset();
     this.predelay.fill(0);
     this.predelayIndex = 0;
-  }
-
-  get sampleRateHz(): number {
-    return this.sampleRate;
+    this.predelayCurrent = this.predelayTarget;
   }
 
   process(
@@ -181,8 +191,12 @@ export class Reverb {
     for (let index = offset; index < offset + length; index += 1) {
       const input = (sendLeft[index]! + sendRight[index]!) * 0.5 * INPUT_GAIN;
       predelay[this.predelayIndex] = input;
-      const readIndex = (this.predelayIndex - this.predelaySamples + predelaySize) % predelaySize;
-      let diffused = predelay[readIndex]!;
+      this.predelayCurrent += (this.predelayTarget - this.predelayCurrent) * PREDELAY_SMOOTHING;
+      const whole = Math.floor(this.predelayCurrent);
+      const fraction = this.predelayCurrent - whole;
+      const newer = (this.predelayIndex - whole + predelaySize) % predelaySize;
+      const older = (newer - 1 + predelaySize) % predelaySize;
+      let diffused = predelay[newer]! * (1 - fraction) + predelay[older]! * fraction;
       this.predelayIndex += 1;
       if (this.predelayIndex >= predelaySize) this.predelayIndex = 0;
 
@@ -210,24 +224,14 @@ export class Reverb {
       wetRight[index] = wetRight[index]! + right * 0.5;
     }
   }
+}
 
-  processBlock(
-    left: Float32Array,
-    right: Float32Array,
-    offset: number,
-    length: number,
-    wet: number,
-  ): void {
-    if (wet <= 0.0001) return;
-    const size = Math.min(length, left.length, right.length);
-    const wetLeft = new Float32Array(size);
-    const wetRight = new Float32Array(size);
-    this.process(left, right, wetLeft, wetRight, offset, size);
-    for (let index = 0; index < size; index += 1) {
-      left[offset + index] = left[offset + index]! + wetLeft[index]! * wet;
-      right[offset + index] = right[offset + index]! + wetRight[index]! * wet;
-    }
+function buildModulationTable(): Float32Array {
+  const table = new Float32Array(MOD_TABLE_SIZE);
+  for (let index = 0; index < MOD_TABLE_SIZE; index += 1) {
+    table[index] = Math.sin((2 * Math.PI * index) / MOD_TABLE_SIZE);
   }
+  return table;
 }
 
 function hadamard(vector: Float64Array): void {

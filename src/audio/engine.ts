@@ -2,15 +2,16 @@ import { EventEmitter } from "node:events";
 import { DspChain } from "../dsp/chain.js";
 import {
   DEFAULT_BUFFER_MS,
+  DEFAULT_SAMPLE_RATE,
   DSP_BLOCK_FRAMES,
   MAX_AUTO_GAIN_DB,
   MAX_BUFFER_MS,
   MIN_BUFFER_MS,
-  OUTPUT_BLOCK_FRAMES,
+  OUTPUT_BLOCK_MS,
   OUTPUT_FRAME_BYTES,
-  SAMPLE_RATE,
   type AppConfig,
   type AudioLevel,
+  type CaptureFormat,
   type DspParams,
   type EnginePhase,
   type EngineStatus,
@@ -18,7 +19,7 @@ import {
   type PublicState,
 } from "../shared/types.js";
 import { PRESETS, clampParams, getPreset } from "../shared/presets.js";
-import { BlockAssembler, interleave, interleavedToBuffer, silentPcm } from "./pcm.js";
+import { BlockAssembler, interleavedToBuffer, silentPcm } from "./pcm.js";
 import { PlaybackQueue } from "./playback-queue.js";
 import { SpotifyCapture } from "./spotify-capture.js";
 import { findSpotifyPids } from "./spotify-discovery.js";
@@ -33,19 +34,24 @@ const SILENCE_AFTER_MS = 120;
 
 export class AudioEngine extends EventEmitter {
   private readonly config: AppConfig;
-  private readonly dsp: DspChain;
+  private dsp: DspChain;
   private readonly output = new WasapiOutput();
   private readonly capture = new SpotifyCapture();
-  private readonly assembler = new BlockAssembler(DSP_BLOCK_FRAMES);
+  private assembler = new BlockAssembler(DSP_BLOCK_FRAMES);
   private readonly queue = new PlaybackQueue();
   private readonly zeroLeft = new Float32Array(DSP_BLOCK_FRAMES);
   private readonly zeroRight = new Float32Array(DSP_BLOCK_FRAMES);
 
   private devices: OutputDevice[] = [];
   private outputDeviceName: string | null = null;
+  private sampleRate = DEFAULT_SAMPLE_RATE;
+  private captureSampleRate = DEFAULT_SAMPLE_RATE;
+  private captureFormat: CaptureFormat = "f32";
   private targetFrames: number;
   private outputPrimed = false;
-  private outputSilence: Buffer = Buffer.alloc(OUTPUT_BLOCK_FRAMES * OUTPUT_FRAME_BYTES);
+  private outputSilence: Buffer = Buffer.alloc(
+    Math.round((DEFAULT_SAMPLE_RATE * OUTPUT_BLOCK_MS) / 1_000) * OUTPUT_FRAME_BYTES,
+  );
   private discoveryTimer: NodeJS.Timeout | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
   private tailTimer: NodeJS.Timeout | null = null;
@@ -67,12 +73,14 @@ export class AudioEngine extends EventEmitter {
   private firstPacketAt = 0;
   private autoGain = 1;
   private driftIntegral = 0;
+  private smoothedFillFrames = 0;
+  private driftSettled = true;
 
   constructor(config: AppConfig) {
     super();
     this.config = config;
-    this.targetFrames = Math.round((config.targetBufferMs * SAMPLE_RATE) / 1000);
-    this.dsp = new DspChain(SAMPLE_RATE, config.effects, DSP_BLOCK_FRAMES);
+    this.targetFrames = Math.round((config.targetBufferMs * this.sampleRate) / 1000);
+    this.dsp = new DspChain(this.sampleRate, config.effects, DSP_BLOCK_FRAMES);
   }
 
   get configSnapshot(): AppConfig {
@@ -82,6 +90,7 @@ export class AudioEngine extends EventEmitter {
   async start(): Promise<void> {
     this.stopping = false;
     this.refreshDevices();
+    this.setSampleRate(this.output.preferredRate(this.config.outputDeviceName));
     this.openOutput();
     this.discoveryTimer = setInterval(() => {
       void this.pollSpotify();
@@ -150,7 +159,7 @@ export class AudioEngine extends EventEmitter {
   setBufferMs(ms: number): void {
     if (!Number.isFinite(ms)) throw new Error("Invalid buffer size");
     this.config.targetBufferMs = Math.min(MAX_BUFFER_MS, Math.max(MIN_BUFFER_MS, Math.round(ms)));
-    this.targetFrames = Math.round((this.config.targetBufferMs * SAMPLE_RATE) / 1000);
+    this.targetFrames = Math.round((this.config.targetBufferMs * this.sampleRate) / 1000);
     if (this.queue.frames > this.targetFrames * 4) this.queue.trimTo(this.targetFrames * 2);
     this.scheduleSave();
     this.emitStatus();
@@ -166,8 +175,11 @@ export class AudioEngine extends EventEmitter {
     this.config.outputDeviceName = deviceName;
     this.queue.clear();
     this.outputPrimed = false;
+    this.capture.stop();
     this.output.stop();
+    this.setSampleRate(this.output.preferredRate(deviceName));
     this.openOutput();
+    void this.pollSpotify();
     this.scheduleSave();
     this.emitStatus();
   }
@@ -184,6 +196,8 @@ export class AudioEngine extends EventEmitter {
     this.firstPacketAt = 0;
     this.hasProcessedAudio = false;
     this.driftIntegral = 0;
+    this.smoothedFillFrames = 0;
+    this.driftSettled = true;
     void this.pollSpotify();
     this.emitStatus();
   }
@@ -201,12 +215,16 @@ export class AudioEngine extends EventEmitter {
     try {
       const result = this.output.open(
         this.config.outputDeviceName,
+        this.sampleRate,
         (frames) => this.onOutputFrame(frames),
         (message) => {
           this.outputError = message;
           this.emitStatus();
         },
       );
+      if (result.sampleRate !== this.sampleRate) {
+        this.setSampleRate(result.sampleRate);
+      }
       this.outputDeviceName = result.device.name;
       this.outputSilence = silentPcm(result.frameSize);
       this.warning = result.warning;
@@ -218,10 +236,34 @@ export class AudioEngine extends EventEmitter {
     }
   }
 
+  private setSampleRate(rate: number): void {
+    const next =
+      Number.isFinite(rate) && rate >= 8_000 && rate <= 192_000
+        ? Math.round(rate)
+        : DEFAULT_SAMPLE_RATE;
+    if (next === this.sampleRate) return;
+    this.sampleRate = next;
+    this.captureSampleRate = next;
+    this.targetFrames = Math.round((this.config.targetBufferMs * next) / 1_000);
+    this.dsp = new DspChain(next, this.config.effects, DSP_BLOCK_FRAMES);
+    this.outputSilence = silentPcm(Math.round((next * OUTPUT_BLOCK_MS) / 1_000));
+    this.queue.clear();
+    this.outputPrimed = false;
+    this.smoothedFillFrames = 0;
+    this.driftIntegral = 0;
+    this.driftSettled = true;
+    if (this.capture.active) {
+      const pid = this.capture.pid;
+      this.capture.stop();
+      if (pid !== null) this.startCapture(pid);
+    }
+  }
+
   private onOutputFrame(frames: number): Buffer {
     if (!this.outputPrimed) {
       if (this.queue.frames >= this.targetFrames) {
         this.outputPrimed = true;
+        this.smoothedFillFrames = this.queue.frames;
       } else {
         return this.silence(frames);
       }
@@ -237,11 +279,22 @@ export class AudioEngine extends EventEmitter {
 
   private driftRatio(): number {
     const target = Math.max(1, this.targetFrames);
-    const error = (this.queue.frames - target) / target;
+    if (this.smoothedFillFrames === 0) this.smoothedFillFrames = this.queue.frames;
+    this.smoothedFillFrames += (this.queue.frames - this.smoothedFillFrames) * 0.05;
+    const error = (this.smoothedFillFrames - target) / target;
+    if (Math.abs(error) < 0.12) {
+      if (!this.driftSettled) {
+        this.queue.settleToUnity();
+        this.driftSettled = true;
+        this.driftIntegral = 0;
+      }
+      return 1;
+    }
+    this.driftSettled = false;
     this.driftIntegral += error * 0.00005;
     this.driftIntegral = Math.min(0.001, Math.max(-0.001, this.driftIntegral));
-    const correction = error * 0.0015 + this.driftIntegral;
-    return Math.min(1.002, Math.max(0.998, 1 + correction));
+    const correction = error * 0.002 + this.driftIntegral;
+    return Math.min(1.001, Math.max(0.999, 1 + correction));
   }
 
   private silence(frames: number): Buffer {
@@ -287,7 +340,15 @@ export class AudioEngine extends EventEmitter {
   }
 
   private startCapture(pid: number): void {
-    this.assembler.reset();
+    if (!this.capture.supportsFloat32) {
+      this.captureError =
+        "The bundled loopback-capture fork is required. Run `npm run build:capture`.";
+      this.emitStatus();
+      return;
+    }
+    this.captureFormat = "f32";
+    this.captureSampleRate = this.sampleRate;
+    this.assembler = new BlockAssembler(DSP_BLOCK_FRAMES, this.captureFormat);
     this.queue.clear();
     this.outputPrimed = false;
     this.firstPacketAt = 0;
@@ -296,10 +357,22 @@ export class AudioEngine extends EventEmitter {
     this.hasProcessedAudio = false;
     this.autoGain = 1;
     this.driftIntegral = 0;
+    this.smoothedFillFrames = 0;
+    this.driftSettled = true;
     try {
-      this.capture.start(pid, (pcm) => {
-        this.onCaptureChunk(pcm);
-      });
+      const started = this.capture.start(
+        pid,
+        (pcm) => {
+          this.onCaptureChunk(pcm);
+        },
+        { format: this.captureFormat, sampleRate: this.sampleRate },
+      );
+      this.captureSampleRate = started.sampleRate;
+      if (started.format !== this.captureFormat) {
+        this.captureFormat = started.format;
+        this.assembler.setFormat(started.format);
+        this.warning = "Float capture was rejected; falling back to 16-bit";
+      }
       this.captureError = null;
     } catch (error) {
       this.captureError = errorMessage(error);
@@ -329,22 +402,29 @@ export class AudioEngine extends EventEmitter {
   }
 
   private processBlock(left: Float32Array, right: Float32Array, frames: number): void {
-    let inputPower = 0;
-    for (let index = 0; index < frames; index += 1) {
-      inputPower += (left[index]! ** 2 + right[index]! ** 2) * 0.5;
-    }
-    this.updateAutoGain(Math.sqrt(inputPower / Math.max(1, frames)));
-    const gain = this.autoGain;
-    if (gain !== 1) {
+    if (this.config.effects.effectsEnabled) {
+      let inputPower = 0;
       for (let index = 0; index < frames; index += 1) {
-        left[index] = left[index]! * gain;
-        right[index] = right[index]! * gain;
+        inputPower += (left[index]! ** 2 + right[index]! ** 2) * 0.5;
       }
+      this.updateAutoGain(Math.sqrt(inputPower / Math.max(1, frames)));
+      const gain = this.autoGain;
+      if (gain !== 1) {
+        for (let index = 0; index < frames; index += 1) {
+          left[index] = left[index]! * gain;
+          right[index] = right[index]! * gain;
+        }
+      }
+    } else {
+      this.autoGain += (1 - this.autoGain) * 0.05;
     }
     this.dsp.processBlock(left, right, frames);
     this.updateLevel(left, right, frames);
-    this.queue.push(interleave(left, right, frames));
-    const maxFrames = Math.max(this.targetFrames * 4, this.targetFrames + 2_400);
+    this.queue.pushInterleaved(left, right, frames);
+    const maxFrames = Math.max(
+      this.targetFrames * 4,
+      this.targetFrames + Math.round(this.sampleRate * 0.05),
+    );
     if (this.queue.frames > maxFrames) {
       this.overruns += 1;
       this.droppedFrames += this.queue.trimTo(this.targetFrames * 2);
@@ -384,9 +464,15 @@ export class AudioEngine extends EventEmitter {
     const silenceFor = now - this.lastCaptureAt;
     if (silenceFor < SILENCE_AFTER_MS || silenceFor > TAIL_LIFETIME_MS) return;
     if (this.queue.frames >= this.targetFrames) return;
-    this.zeroLeft.fill(0);
-    this.zeroRight.fill(0);
-    this.processBlock(this.zeroLeft, this.zeroRight, DSP_BLOCK_FRAMES);
+    let remaining = Math.max(1, Math.round((this.sampleRate * TAIL_INTERVAL_MS) / 1_000));
+    while (remaining > 0) {
+      const frames = Math.min(DSP_BLOCK_FRAMES, remaining);
+      this.zeroLeft.fill(0);
+      this.zeroRight.fill(0);
+      this.processBlock(this.zeroLeft, this.zeroRight, frames);
+      remaining -= frames;
+      if (this.queue.frames >= this.targetFrames) break;
+    }
   }
 
   private tick(): void {
@@ -438,8 +524,10 @@ export class AudioEngine extends EventEmitter {
       captureActive: this.capture.active,
       outputActive: this.outputDeviceName !== null,
       outputDeviceName: this.outputDeviceName,
-      sampleRate: SAMPLE_RATE,
-      bufferMs: Math.round((this.queue.frames / SAMPLE_RATE) * 1000),
+      sampleRate: this.sampleRate,
+      captureSampleRate: this.captureSampleRate,
+      captureFormat: this.captureFormat,
+      bufferMs: Math.round((this.queue.frames / this.sampleRate) * 1000),
       targetBufferMs: this.config.targetBufferMs,
       level,
       underruns: this.underruns,

@@ -8,3 +8,7 @@ src-tauri/gen/
 .env
 .env.*
 !.env.example
+vendor/loopback-capture/target/
+vendor/loopback-capture/node_modules/
+!vendor/loopback-capture/dist/
+!vendor/loopback-capture/dist/**

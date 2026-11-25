@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_PRESET_ID, clampParams, defaultEffects, getPreset } from "../shared/presets.js";
+import { DEFAULT_PRESET_ID, clampParams, defaultEffects, getPreset, neutralEffects } from "../shared/presets.js";
 import type { AppConfig, DspParams } from "../shared/types.js";
 import { DEFAULT_BUFFER_MS, MAX_BUFFER_MS, MIN_BUFFER_MS } from "../shared/types.js";
 
@@ -22,8 +22,12 @@ export function loadConfig(): AppConfig {
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<AppConfig>;
     const preset = raw.presetId ? getPreset(raw.presetId) : undefined;
+    const baseEffects =
+      raw.presetId && !preset
+        ? neutralEffects()
+        : (preset?.params ?? fallback.effects);
     const effects = clampParams({
-      ...(preset?.params ?? fallback.effects),
+      ...baseEffects,
       ...(raw.effects ?? {}),
     });
     return {

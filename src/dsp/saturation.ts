@@ -17,8 +17,10 @@ export class Saturation {
   private readonly highRight = new Biquad();
   private readonly highLeft2 = new Biquad();
   private readonly highRight2 = new Biquad();
-  private previousLowLeft = 0;
-  private previousLowRight = 0;
+  private previousDrivenLeft = 0;
+  private previousDrivenRight = 0;
+  private previousLogCoshLeft = 0;
+  private previousLogCoshRight = 0;
 
   constructor(sampleRate = 48_000) {
     const low = lowPass(sampleRate, CROSSOVER_HZ, Math.SQRT1_2);
@@ -48,8 +50,10 @@ export class Saturation {
     this.highRight.reset();
     this.highLeft2.reset();
     this.highRight2.reset();
-    this.previousLowLeft = 0;
-    this.previousLowRight = 0;
+    this.previousDrivenLeft = 0;
+    this.previousDrivenRight = 0;
+    this.previousLogCoshLeft = 0;
+    this.previousLogCoshRight = 0;
   }
 
   processBlock(
@@ -58,7 +62,7 @@ export class Saturation {
     offset: number,
     length: number,
   ): void {
-    if (this.amount <= 0.0001) return;
+    if (length <= 0) return;
     const inverseDrive = 1 / this.drive;
     const wet = this.amount * 0.85;
     const dry = 1 - wet;
@@ -72,25 +76,46 @@ export class Saturation {
 
       const drivenLeft = lowLeft * this.drive;
       const drivenRight = lowRight * this.drive;
-      const shapedLeft = antiderivativeTanh(drivenLeft, this.previousLowLeft);
-      const shapedRight = antiderivativeTanh(drivenRight, this.previousLowRight);
-      this.previousLowLeft = drivenLeft;
-      this.previousLowRight = drivenRight;
+      const logCoshLeft = logCosh(drivenLeft);
+      const logCoshRight = logCosh(drivenRight);
+      const shapedLeft = antiderivativeTanh(
+        drivenLeft,
+        this.previousDrivenLeft,
+        logCoshLeft,
+        this.previousLogCoshLeft,
+      );
+      const shapedRight = antiderivativeTanh(
+        drivenRight,
+        this.previousDrivenRight,
+        logCoshRight,
+        this.previousLogCoshRight,
+      );
+      this.previousDrivenLeft = drivenLeft;
+      this.previousDrivenRight = drivenRight;
+      this.previousLogCoshLeft = logCoshLeft;
+      this.previousLogCoshRight = logCoshRight;
 
       const saturatedLeft = shapedLeft * inverseDrive * this.makeup;
       const saturatedRight = shapedRight * inverseDrive * this.makeup;
-      left[index] = highLeft + lowLeft * dry + saturatedLeft * wet;
-      right[index] = highRight + lowRight * dry + saturatedRight * wet;
+      const filteredLeft = highLeft + lowLeft * dry + saturatedLeft * wet;
+      const filteredRight = highRight + lowRight * dry + saturatedRight * wet;
+      left[index] = leftSample + (filteredLeft - leftSample) * this.amount;
+      right[index] = rightSample + (filteredRight - rightSample) * this.amount;
     }
   }
 }
 
-function antiderivativeTanh(current: number, previous: number): number {
+function antiderivativeTanh(
+  current: number,
+  previous: number,
+  logCoshCurrent: number,
+  logCoshPrevious: number,
+): number {
   const delta = current - previous;
   if (Math.abs(delta) < SMALL_DELTA) {
     return Math.tanh((current + previous) * 0.5);
   }
-  return (logCosh(current) - logCosh(previous)) / delta;
+  return (logCoshCurrent - logCoshPrevious) / delta;
 }
 
 function logCosh(value: number): number {

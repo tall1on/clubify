@@ -1,23 +1,32 @@
 import {
-  CAPTURE_FRAME_BYTES,
+  CAPTURE_F32_FRAME_BYTES,
+  CAPTURE_S16_FRAME_BYTES,
   DSP_BLOCK_FRAMES,
   OUTPUT_FRAME_BYTES,
+  type CaptureFormat,
 } from "../shared/types.js";
 
 export class BlockAssembler {
   private readonly blockFrames: number;
+  private format: CaptureFormat;
   private readonly carryLeft: Float32Array;
   private readonly carryRight: Float32Array;
   private carryLength = 0;
 
-  constructor(blockFrames = DSP_BLOCK_FRAMES) {
+  constructor(blockFrames = DSP_BLOCK_FRAMES, format: CaptureFormat = "s16") {
     this.blockFrames = blockFrames;
+    this.format = format;
     this.carryLeft = new Float32Array(blockFrames);
     this.carryRight = new Float32Array(blockFrames);
   }
 
   get pendingFrames(): number {
     return this.carryLength;
+  }
+
+  setFormat(format: CaptureFormat): void {
+    this.format = format;
+    this.carryLength = 0;
   }
 
   reset(): void {
@@ -28,16 +37,26 @@ export class BlockAssembler {
     pcm: Buffer,
     onBlock: (left: Float32Array, right: Float32Array, frames: number) => void,
   ): void {
-    const frames = Math.floor(pcm.length / CAPTURE_FRAME_BYTES);
+    const frameBytes =
+      this.format === "f32" ? CAPTURE_F32_FRAME_BYTES : CAPTURE_S16_FRAME_BYTES;
+    const frames = Math.floor(pcm.length / frameBytes);
     let offset = 0;
     while (offset < frames) {
       const available = this.blockFrames - this.carryLength;
       const count = Math.min(available, frames - offset);
-      for (let index = 0; index < count; index += 1) {
-        const frameOffset = (offset + index) * CAPTURE_FRAME_BYTES;
-        this.carryLeft[this.carryLength + index] = pcm.readInt16LE(frameOffset) / 32768;
-        this.carryRight[this.carryLength + index] =
-          pcm.readInt16LE(frameOffset + 2) / 32768;
+      if (this.format === "f32") {
+        for (let index = 0; index < count; index += 1) {
+          const frameOffset = (offset + index) * frameBytes;
+          this.carryLeft[this.carryLength + index] = pcm.readFloatLE(frameOffset);
+          this.carryRight[this.carryLength + index] = pcm.readFloatLE(frameOffset + 4);
+        }
+      } else {
+        for (let index = 0; index < count; index += 1) {
+          const frameOffset = (offset + index) * frameBytes;
+          this.carryLeft[this.carryLength + index] = pcm.readInt16LE(frameOffset) / 32768;
+          this.carryRight[this.carryLength + index] =
+            pcm.readInt16LE(frameOffset + 2) / 32768;
+        }
       }
       this.carryLength += count;
       offset += count;

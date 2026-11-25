@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Clubify",
+  "version": "0.1.0",
+  "identifier": "com.clubify.audio",
+  "build": {
+    "beforeDevCommand": "npm run ui:dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run ui:build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Clubify",
+        "width": 1180,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 620,
+        "visible": false,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "resources/node.exe": "node.exe",
+      "resources/NODE-LICENSE": "NODE-LICENSE",
+      "resources/engine": "engine"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
+}

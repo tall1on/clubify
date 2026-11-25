@@ -1,14 +1,29 @@
+# Dependencies
 node_modules/
-dist/
-ui/dist/
-src-tauri/target/
-src-tauri/resources/
-src-tauri/gen/
+vendor/loopback-capture/node_modules/
+
+# Build output
+/dist/
+/ui/dist/
+/src-tauri/target/
+/src-tauri/resources/
+/src-tauri/gen/
+/vendor/loopback-capture/target/
+
+# TypeScript and test caches
+*.tsbuildinfo
+/coverage/
+
+# Local environment and logs
 *.log
 .env
 .env.*
 !.env.example
-vendor/loopback-capture/target/
-vendor/loopback-capture/node_modules/
-!vendor/loopback-capture/dist/
-!vendor/loopback-capture/dist/**
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Note: vendor/loopback-capture/dist and build/Release are intentionally tracked
+# so the patched capture addon ships prebuilt.

@@ -19,6 +19,7 @@ use tauri::{
     Manager, RunEvent, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_updater::UpdaterExt;
 
 const ENGINE_PORT: u16 = 8787;
 
@@ -31,10 +32,12 @@ fn main() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineState(Mutex::new(None)))
         .manage(Quitting(Mutex::new(false)))
         .setup(|app| {
             spawn_engine(app.handle());
+            spawn_update_check(app.handle().clone());
 
             if env::var_os("CLUBIFY_SHOW").is_some()
                 || env::args().any(|argument| argument == "--show")
@@ -152,6 +155,46 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+fn spawn_update_check(app: tauri::AppHandle) {
+    if cfg!(debug_assertions) && env::var_os("CLUBIFY_UPDATE_CHECK").is_none() {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let stop_handle = app.clone();
+        let updater = match app
+            .updater_builder()
+            .timeout(Duration::from_secs(30))
+            .on_before_exit(move || stop_engine(&stop_handle))
+            .build()
+        {
+            Ok(updater) => updater,
+            Err(error) => {
+                eprintln!("[clubify] updater unavailable: {error}");
+                return;
+            }
+        };
+
+        match updater.check().await {
+            Ok(Some(update)) => {
+                eprintln!(
+                    "[clubify] installing update {} (current {})",
+                    update.version, update.current_version
+                );
+                if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
+                    eprintln!("[clubify] update failed: {error}");
+                    spawn_engine(&app);
+                    return;
+                }
+                #[cfg(not(windows))]
+                app.restart();
+            }
+            Ok(None) => eprintln!("[clubify] no update available"),
+            Err(error) => eprintln!("[clubify] update check failed: {error}"),
+        }
+    });
 }
 
 fn spawn_engine(app: &tauri::AppHandle) {

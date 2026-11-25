@@ -90,6 +90,25 @@ The packaged app starts the bundled engine automatically and does not require a 
 
 The release build enables autostart on first launch and records that decision, so disabling autostart from the tray menu sticks across updates. The tray menu has a **Start with Windows** checkbox. Debug builds do not touch autostart.
 
+### Releases and auto-updates
+
+Release builds update themselves from GitHub Releases. On start, they fetch `https://github.com/tall1on/clubify/releases/latest/download/latest.json`, download the signed NSIS installer when a newer version is published, stop the bundled engine, install, and relaunch.
+
+The release workflow (`.github/workflows/release.yml`) runs on a self-hosted Windows x64 runner when the version changes on `main`. It builds the engine, produces NSIS and signed updater artifacts, and publishes the GitHub release (installer, `.sig`, and `latest.json`). The workflow can also be started manually with `workflow_dispatch`.
+
+Bump every manifest at once, then push:
+
+```powershell
+npm run version:bump -- 0.2.0
+git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git commit -m "release 0.2.0"
+git push origin main
+```
+
+The updater keypair was generated with `npx tauri signer generate -w "$env:USERPROFILE\.tauri\clubify.key"`. The public key is embedded in `src-tauri/tauri.conf.json`. Add the private key file contents as the `TAURI_SIGNING_PRIVATE_KEY` repository secret, plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has a password. Keep the private key safe: installed copies cannot verify updates signed with a different key. Builds made before the updater was added have to be replaced manually once.
+
+The self-hosted runner needs the `self-hosted`, `Windows`, and `X64` labels, Node.js 20, Rust, and the Visual Studio C++ build tools with the Windows SDK. GitHub Releases must be publicly readable because the updater does not ship a GitHub token. `npm run desktop:build` still produces unsigned local bundles; signed updater artifacts are created only by the release workflow. Set `CLUBIFY_UPDATE_CHECK=1` to exercise the updater from a debug build.
+
 ## Controls
 
 Presets:

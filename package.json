@@ -19,7 +19,8 @@
         "package:engine": "npm run build && node scripts/package-engine.mjs",
         "desktop:build": "npm run package:engine && tauri build",
         "build:capture": "node vendor/loopback-capture/scripts/build-native.mjs",
-        "ui:typecheck": "node scripts/ui-typecheck.cjs -p ui/tsconfig.json --noEmit"
+        "ui:typecheck": "node scripts/ui-typecheck.cjs -p ui/tsconfig.json --noEmit",
+        "version:bump": "node scripts/bump-version.mjs"
     },
     "engines": {
         "node": ">=20"

@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
 import type { RtAudio as RtAudioInstance } from "audify";
 import {
+  CHANNELS,
   OUTPUT_BLOCK_FRAMES,
+  OUTPUT_BYTES_PER_SAMPLE,
   SAMPLE_RATE,
   type OutputDevice,
 } from "../shared/types.js";
@@ -13,7 +15,7 @@ const { RtAudio } = require("audify") as {
 };
 
 const WASAPI_API = 7;
-const SINT16_FORMAT = 0x2;
+const FLOAT32_FORMAT = 0x10;
 const STREAM_FLAGS = 0x2 | 0x8;
 
 type AudifyDevice = ReturnType<RtAudioInstance["getDevices"]>[number];
@@ -28,7 +30,9 @@ export class WasapiOutput {
   private rt: RtAudioInstance | null = null;
   private running = false;
   private frameSize = OUTPUT_BLOCK_FRAMES;
-  private silentFrame: Buffer = Buffer.alloc(OUTPUT_BLOCK_FRAMES * 4);
+  private silentFrame: Buffer = Buffer.alloc(
+    OUTPUT_BLOCK_FRAMES * CHANNELS * OUTPUT_BYTES_PER_SAMPLE,
+  );
   private errorHandler: ((message: string) => void) | null = null;
 
   listDevices(): OutputDevice[] {
@@ -82,7 +86,7 @@ export class WasapiOutput {
     const actualFrameSize = rt.openStream(
       { deviceId: device.id, nChannels: 2, firstChannel: 0 },
       null,
-      SINT16_FORMAT,
+      FLOAT32_FORMAT,
       SAMPLE_RATE,
       frameSize,
       "clubify",

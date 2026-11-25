@@ -3,9 +3,11 @@ import { DspChain } from "../dsp/chain.js";
 import {
   DEFAULT_BUFFER_MS,
   DSP_BLOCK_FRAMES,
+  MAX_AUTO_GAIN_DB,
   MAX_BUFFER_MS,
   MIN_BUFFER_MS,
   OUTPUT_BLOCK_FRAMES,
+  OUTPUT_FRAME_BYTES,
   SAMPLE_RATE,
   type AppConfig,
   type AudioLevel,
@@ -16,7 +18,7 @@ import {
   type PublicState,
 } from "../shared/types.js";
 import { PRESETS, clampParams, getPreset } from "../shared/presets.js";
-import { BlockAssembler, floatToPcm16, silentPcm } from "./pcm.js";
+import { BlockAssembler, interleave, interleavedToBuffer, silentPcm } from "./pcm.js";
 import { PlaybackQueue } from "./playback-queue.js";
 import { SpotifyCapture } from "./spotify-capture.js";
 import { findSpotifyPids } from "./spotify-discovery.js";
@@ -43,7 +45,7 @@ export class AudioEngine extends EventEmitter {
   private outputDeviceName: string | null = null;
   private targetFrames: number;
   private outputPrimed = false;
-  private outputSilence: Buffer = Buffer.alloc(OUTPUT_BLOCK_FRAMES * 4);
+  private outputSilence: Buffer = Buffer.alloc(OUTPUT_BLOCK_FRAMES * OUTPUT_FRAME_BYTES);
   private discoveryTimer: NodeJS.Timeout | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
   private tailTimer: NodeJS.Timeout | null = null;
@@ -64,6 +66,7 @@ export class AudioEngine extends EventEmitter {
   private smoothedPower = 0;
   private firstPacketAt = 0;
   private autoGain = 1;
+  private driftIntegral = 0;
 
   constructor(config: AppConfig) {
     super();
@@ -180,6 +183,7 @@ export class AudioEngine extends EventEmitter {
     this.outputPrimed = false;
     this.firstPacketAt = 0;
     this.hasProcessedAudio = false;
+    this.driftIntegral = 0;
     void this.pollSpotify();
     this.emitStatus();
   }
@@ -222,16 +226,26 @@ export class AudioEngine extends EventEmitter {
         return this.silence(frames);
       }
     }
-    const read = this.queue.read(frames);
+    const ratio = this.driftRatio();
+    const read = this.queue.read(frames, ratio);
     if (read.missingFrames > 0) {
       this.underruns += 1;
       this.outputPrimed = false;
     }
-    return read.data;
+    return interleavedToBuffer(read.data);
+  }
+
+  private driftRatio(): number {
+    const target = Math.max(1, this.targetFrames);
+    const error = (this.queue.frames - target) / target;
+    this.driftIntegral += error * 0.00005;
+    this.driftIntegral = Math.min(0.001, Math.max(-0.001, this.driftIntegral));
+    const correction = error * 0.0015 + this.driftIntegral;
+    return Math.min(1.002, Math.max(0.998, 1 + correction));
   }
 
   private silence(frames: number): Buffer {
-    if (this.outputSilence.length !== frames * 4) {
+    if (this.outputSilence.length !== frames * OUTPUT_FRAME_BYTES) {
       this.outputSilence = silentPcm(frames);
     }
     return this.outputSilence;
@@ -281,6 +295,7 @@ export class AudioEngine extends EventEmitter {
     this.lastChunkCount = 0;
     this.hasProcessedAudio = false;
     this.autoGain = 1;
+    this.driftIntegral = 0;
     try {
       this.capture.start(pid, (pcm) => {
         this.onCaptureChunk(pcm);
@@ -328,8 +343,7 @@ export class AudioEngine extends EventEmitter {
     }
     this.dsp.processBlock(left, right, frames);
     this.updateLevel(left, right, frames);
-    const buffer = floatToPcm16(left, right, frames);
-    this.queue.push(buffer);
+    this.queue.push(interleave(left, right, frames));
     const maxFrames = Math.max(this.targetFrames * 4, this.targetFrames + 2_400);
     if (this.queue.frames > maxFrames) {
       this.overruns += 1;
@@ -344,7 +358,8 @@ export class AudioEngine extends EventEmitter {
     }
     if (inputRms < 0.0002) return;
     const targetRms = 0.1;
-    const desired = Math.min(16, Math.max(0.25, targetRms / inputRms));
+    const maxGain = Math.pow(10, MAX_AUTO_GAIN_DB / 20);
+    const desired = Math.min(maxGain, Math.max(0.25, targetRms / inputRms));
     this.autoGain += (desired - this.autoGain) * 0.003;
   }
 

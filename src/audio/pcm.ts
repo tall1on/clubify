@@ -1,4 +1,8 @@
-import { DSP_BLOCK_FRAMES, FRAME_BYTES } from "../shared/types.js";
+import {
+  CAPTURE_FRAME_BYTES,
+  DSP_BLOCK_FRAMES,
+  OUTPUT_FRAME_BYTES,
+} from "../shared/types.js";
 
 export class BlockAssembler {
   private readonly blockFrames: number;
@@ -24,13 +28,13 @@ export class BlockAssembler {
     pcm: Buffer,
     onBlock: (left: Float32Array, right: Float32Array, frames: number) => void,
   ): void {
-    const frames = Math.floor(pcm.length / FRAME_BYTES);
+    const frames = Math.floor(pcm.length / CAPTURE_FRAME_BYTES);
     let offset = 0;
     while (offset < frames) {
       const available = this.blockFrames - this.carryLength;
       const count = Math.min(available, frames - offset);
       for (let index = 0; index < count; index += 1) {
-        const frameOffset = (offset + index) * FRAME_BYTES;
+        const frameOffset = (offset + index) * CAPTURE_FRAME_BYTES;
         this.carryLeft[this.carryLength + index] = pcm.readInt16LE(frameOffset) / 32768;
         this.carryRight[this.carryLength + index] =
           pcm.readInt16LE(frameOffset + 2) / 32768;
@@ -57,33 +61,24 @@ export class BlockAssembler {
   }
 }
 
-export function floatToPcm16(
+export function interleave(
   left: Float32Array,
   right: Float32Array,
   frames: number,
-): Buffer {
-  const buffer = Buffer.allocUnsafe(frames * FRAME_BYTES);
-  if (buffer.byteOffset % 2 === 0) {
-    const view = new Int16Array(buffer.buffer, buffer.byteOffset, frames * 2);
-    for (let index = 0; index < frames; index += 1) {
-      view[index * 2] = toInt16(left[index]!);
-      view[index * 2 + 1] = toInt16(right[index]!);
-    }
-  } else {
-    for (let index = 0; index < frames; index += 1) {
-      buffer.writeInt16LE(toInt16(left[index]!), index * FRAME_BYTES);
-      buffer.writeInt16LE(toInt16(right[index]!), index * FRAME_BYTES + 2);
-    }
+): Float32Array {
+  const output = new Float32Array(frames * 2);
+  for (let index = 0; index < frames; index += 1) {
+    output[index * 2] = left[index]!;
+    output[index * 2 + 1] = right[index]!;
   }
-  return buffer;
+  return output;
 }
 
-function toInt16(sample: number): number {
-  const clamped = Math.max(-1, Math.min(1, sample));
-  return Math.max(-32768, Math.min(32767, Math.round(clamped * 32768)));
+export function interleavedToBuffer(samples: Float32Array): Buffer {
+  return Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
 }
 
 export function silentPcm(frames: number, cached?: Buffer): Buffer {
-  if (cached && cached.length === frames * FRAME_BYTES) return cached;
-  return Buffer.alloc(frames * FRAME_BYTES);
+  if (cached && cached.length === frames * OUTPUT_FRAME_BYTES) return cached;
+  return Buffer.alloc(frames * OUTPUT_FRAME_BYTES);
 }

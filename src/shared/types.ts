@@ -1,9 +1,12 @@
 export const SAMPLE_RATE = 48_000;
 export const CHANNELS = 2;
-export const BYTES_PER_SAMPLE = 2;
-export const FRAME_BYTES = CHANNELS * BYTES_PER_SAMPLE;
+export const CAPTURE_BYTES_PER_SAMPLE = 2;
+export const CAPTURE_FRAME_BYTES = CHANNELS * CAPTURE_BYTES_PER_SAMPLE;
+export const OUTPUT_BYTES_PER_SAMPLE = 4;
+export const OUTPUT_FRAME_BYTES = CHANNELS * OUTPUT_BYTES_PER_SAMPLE;
 export const DSP_BLOCK_FRAMES = 256;
 export const OUTPUT_BLOCK_FRAMES = 480;
+export const MAX_AUTO_GAIN_DB = 12;
 
 export const MIN_BUFFER_MS = 16;
 export const MAX_BUFFER_MS = 240;
@@ -14,13 +17,23 @@ export interface DspParams {
   inputGainDb: number;
   bassDb: number;
   bassFrequency: number;
+  lowMidCutDb: number;
+  lowMidFrequency: number;
+  presenceDb: number;
+  presenceFrequency: number;
+  airDampingHz: number;
+  width: number;
+  distance: number;
   saturation: number;
   compression: number;
   thresholdDb: number;
   ratio: number;
+  earlyReflections: number;
   reverbMix: number;
   reverbSize: number;
   reverbDamping: number;
+  reverbPredelayMs: number;
+  reverbDuck: number;
   outputGainDb: number;
 }
 

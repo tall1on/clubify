@@ -187,6 +187,15 @@ onBeforeUnmount(() => engine.disconnect());
           @change="(value) => engine.setEffects({ reverbMix: value })"
         />
         <RangeSlider
+          label="Room distance"
+          :value="effects.distance"
+          :min="0"
+          :max="1"
+          :step="0.01"
+          :display="formatPercent"
+          @change="(value) => engine.setEffects({ distance: value })"
+        />
+        <RangeSlider
           label="Compression"
           :value="effects.compression"
           :min="0"
@@ -291,6 +300,87 @@ onBeforeUnmount(() => engine.disconnect());
           :step="1"
           suffix=" Hz"
           @change="(value) => engine.setEffects({ bassFrequency: value })"
+        />
+        <RangeSlider
+          label="Low-mid scoop"
+          :value="effects.lowMidCutDb"
+          :min="-12"
+          :max="0"
+          :step="0.5"
+          suffix=" dB"
+          @change="(value) => engine.setEffects({ lowMidCutDb: value })"
+        />
+        <RangeSlider
+          label="Scoop frequency"
+          :value="effects.lowMidFrequency"
+          :min="150"
+          :max="800"
+          :step="5"
+          suffix=" Hz"
+          @change="(value) => engine.setEffects({ lowMidFrequency: value })"
+        />
+        <RangeSlider
+          label="PA presence"
+          :value="effects.presenceDb"
+          :min="0"
+          :max="9"
+          :step="0.5"
+          suffix=" dB"
+          @change="(value) => engine.setEffects({ presenceDb: value })"
+        />
+        <RangeSlider
+          label="Presence frequency"
+          :value="effects.presenceFrequency"
+          :min="800"
+          :max="5000"
+          :step="50"
+          suffix=" Hz"
+          @change="(value) => engine.setEffects({ presenceFrequency: value })"
+        />
+        <RangeSlider
+          label="Air damping"
+          :value="effects.airDampingHz"
+          :min="4000"
+          :max="20000"
+          :step="250"
+          suffix=" Hz"
+          @change="(value) => engine.setEffects({ airDampingHz: value })"
+        />
+        <RangeSlider
+          label="Stereo width"
+          :value="effects.width"
+          :min="0"
+          :max="1"
+          :step="0.01"
+          :display="formatPercent"
+          @change="(value) => engine.setEffects({ width: value })"
+        />
+        <RangeSlider
+          label="Early reflections"
+          :value="effects.earlyReflections"
+          :min="0"
+          :max="1"
+          :step="0.01"
+          :display="formatPercent"
+          @change="(value) => engine.setEffects({ earlyReflections: value })"
+        />
+        <RangeSlider
+          label="Reverb predelay"
+          :value="effects.reverbPredelayMs"
+          :min="0"
+          :max="60"
+          :step="1"
+          suffix=" ms"
+          @change="(value) => engine.setEffects({ reverbPredelayMs: value })"
+        />
+        <RangeSlider
+          label="Reverb ducking"
+          :value="effects.reverbDuck"
+          :min="0"
+          :max="1"
+          :step="0.01"
+          :display="formatPercent"
+          @change="(value) => engine.setEffects({ reverbDuck: value })"
         />
         <RangeSlider
           label="Reverb size"

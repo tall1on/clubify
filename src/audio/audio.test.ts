@@ -1,15 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { BlockAssembler, floatToPcm16 } from "./pcm.js";
+import { BlockAssembler, interleave } from "./pcm.js";
 import { PlaybackQueue } from "./playback-queue.js";
 import { parseTasklist } from "./spotify-discovery.js";
-import { FRAME_BYTES } from "../shared/types.js";
+import { CAPTURE_FRAME_BYTES } from "../shared/types.js";
 
 function pcm(frames: number, value: number): Buffer {
-  const buffer = Buffer.alloc(frames * FRAME_BYTES);
+  const buffer = Buffer.alloc(frames * CAPTURE_FRAME_BYTES);
   for (let index = 0; index < frames; index += 1) {
-    buffer.writeInt16LE(value, index * FRAME_BYTES);
-    buffer.writeInt16LE(value, index * FRAME_BYTES + 2);
+    buffer.writeInt16LE(value, index * CAPTURE_FRAME_BYTES);
+    buffer.writeInt16LE(value, index * CAPTURE_FRAME_BYTES + 2);
   }
+  return buffer;
+}
+
+function samples(frames: number, value: number): Float32Array {
+  const buffer = new Float32Array(frames * 2);
+  buffer.fill(value);
   return buffer;
 }
 
@@ -24,7 +30,7 @@ describe("block assembler", () => {
     expect(assembler.pendingFrames).toBe(0);
   });
 
-  it("converts signed 16-bit PCM to floats and back", () => {
+  it("converts signed 16-bit PCM to floats and interleaves float output", () => {
     const assembler = new BlockAssembler(2);
     let captured: { left: number[]; right: number[] } | null = null;
     assembler.push(pcm(2, 16384), (left, right) => {
@@ -32,34 +38,69 @@ describe("block assembler", () => {
     });
     expect(captured).not.toBeNull();
     expect(captured!.left[0]).toBeCloseTo(0.5, 4);
-    const output = floatToPcm16(new Float32Array([0.5, -0.5]), new Float32Array([0.25, 2]), 2);
-    expect(output.readInt16LE(0)).toBe(16384);
-    expect(output.readInt16LE(2)).toBe(8192);
-    expect(output.readInt16LE(4)).toBe(-16384);
-    expect(output.readInt16LE(6)).toBe(32767);
+    const output = interleave(new Float32Array([0.5, -0.5]), new Float32Array([0.25, 2]), 2);
+    expect(Array.from(output)).toEqual([0.5, 0.25, -0.5, 2]);
   });
 });
 
 describe("playback queue", () => {
   it("reads across chunks and reports missing frames", () => {
     const queue = new PlaybackQueue();
-    queue.push(pcm(960, 1));
+    queue.push(samples(960, 0.25));
     const first = queue.read(480);
     expect(first.missingFrames).toBe(0);
-    expect(first.data.length).toBe(480 * FRAME_BYTES);
+    expect(first.data.length).toBe(480 * 2);
+    expect(first.data[0]).toBeCloseTo(0.25, 5);
     const second = queue.read(480);
     expect(second.missingFrames).toBe(0);
     const missing = queue.read(480);
     expect(missing.missingFrames).toBe(480);
-    expect(missing.data.length).toBe(480 * FRAME_BYTES);
+    expect(missing.data.length).toBe(480 * 2);
+    expect(missing.data[0]).toBe(0);
   });
 
   it("trims oldest audio above the latency cap", () => {
     const queue = new PlaybackQueue();
-    queue.push(pcm(4800, 1));
+    queue.push(samples(4_800, 1));
     const dropped = queue.trimTo(1_920);
     expect(dropped).toBe(2_880);
     expect(queue.frames).toBe(1_920);
+  });
+
+  it("reads with a small drift ratio without failing", () => {
+    const queue = new PlaybackQueue();
+    queue.push(samples(4_800, 0.5));
+    const read = queue.read(1_000, 1.0005);
+    expect(read.missingFrames).toBe(0);
+    expect(read.data.length).toBe(2_000);
+    for (const sample of read.data) {
+      expect(Number.isFinite(sample)).toBe(true);
+      expect(Math.abs(sample - 0.5)).toBeLessThan(1e-6);
+    }
+  });
+
+  it("returns exact samples at unity ratio", () => {
+    const queue = new PlaybackQueue();
+    const ramp = new Float32Array(2_000);
+    for (let index = 0; index < 1_000; index += 1) {
+      ramp[index * 2] = index / 1_000;
+      ramp[index * 2 + 1] = -index / 1_000;
+    }
+    queue.push(ramp);
+    const read = queue.read(500);
+    expect(read.missingFrames).toBe(0);
+    for (let index = 0; index < 500; index += 1) {
+      expect(read.data[index * 2]).toBeCloseTo(index / 1_000, 6);
+      expect(read.data[index * 2 + 1]).toBeCloseTo(-index / 1_000, 6);
+    }
+  });
+
+  it("grows when the queue exceeds its initial capacity", () => {
+    const queue = new PlaybackQueue(64);
+    for (let index = 0; index < 10; index += 1) queue.push(samples(64, index / 10));
+    expect(queue.frames).toBe(640);
+    const read = queue.read(640);
+    expect(read.missingFrames).toBe(0);
   });
 });
 

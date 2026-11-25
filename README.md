@@ -7,9 +7,9 @@ Spotify-only nightclub processing for Windows. Clubify captures only the Spotify
 ## What it does
 
 - Captures `Spotify.exe` and its descendants through WASAPI process loopback.
-- 48 kHz stereo PCM, fixed-size DSP blocks, event-driven WASAPI output.
-- Stereo bass shelf, soft saturation, Freeverb-style club reverb, stereo-linked compressor, limiter, and auto level.
-- Five room presets plus live fine tuning and click-free bypass.
+- 48 kHz stereo capture, fixed-size DSP blocks, float32 WASAPI output, and a drift-corrected jitter queue.
+- PA-style tone shaping (sub peak, low-mid scoop, presence horn, air damping), low-band ADAA saturation, early reflections, an FDN room reverb with predelay and ducking, stereo width, distance macro, RMS compressor, lookahead limiter, and auto level.
+- Six room presets plus live fine tuning and click-free bypass.
 - Automatic Spotify process discovery and capture restart.
 - Tauri tray app, close-to-tray, and Windows autostart in release builds.
 - Browser control UI is also available for development.
@@ -86,15 +86,16 @@ The release build enables autostart on first launch and records that decision, s
 
 Presets:
 
-- **Nightclub** — warm low end, moderate drive, medium room.
+- **Afterhours** — hollow concrete room, horn-loaded PA, distant sub (default).
+- **Nightclub** — warm low end, moderate drive, velvet room.
 - **Deep House** — deeper bass, long tail, gentle compression.
 - **Festival** — loud, forward, heavily glued.
 - **Warehouse** — dirty saturation and a large concrete tail.
 - **Clean** — captured signal with effects bypassed.
 
-Main controls: bass, saturation, club reverb, compression, output gain, preset selection, bypass.
+Main controls: bass, saturation, club reverb, room distance, compression, output gain, preset selection, bypass.
 
-Fine tuning: input trim, bass corner frequency, reverb size and damping, compressor threshold and ratio, safety buffer, auto level, output device.
+Fine tuning: input trim, bass corner, low-mid scoop and frequency, PA presence and frequency, air damping, stereo width, early reflections, reverb size, damping, predelay and ducking, compressor threshold and ratio, safety buffer, auto level, output device.
 
 Auto level slowly normalizes quiet captures toward a music-ready level. It is on by default and can be disabled in the routing panel.
 
@@ -111,13 +112,13 @@ loopback-capture (Rust N-API addon)
    |
    |  16-bit stereo PCM @ 48 kHz
    v
-Block assembler -> DSP chain -> jitter queue
-                              |
-                              v
-                       audify / WASAPI render
-                              |
-                              v
-                    headphones or speakers
+Block assembler -> float32 DSP chain -> drift-corrected jitter queue
+                                                    |
+                                                    v
+                                    audify / WASAPI float32 render
+                                                    |
+                                                    v
+                                         headphones or speakers
 
 Tauri app --tray/autostart--> spawns Node engine
 Browser or WebView UI <--WebSocket--> engine control server
@@ -196,7 +197,11 @@ Auto level adapts slowly by design. Use input trim for manual gain and output ga
 
 **Clicks, dropouts, or underruns**
 
-Raise the safety buffer, close CPU-heavy applications, or choose a different output device. The engine drops data rather than growing latency without bound; the overrun counter records that.
+Raise the safety buffer, close CPU-heavy applications, or choose a different output device. The engine drops data rather than growing latency without bound; the overrun counter records that. Clock drift between the capture and output device is absorbed by a small playback-ratio correction instead of by trimming.
+
+**Lossless Spotify sounds slightly gritty or distorted**
+
+Set Spotify's volume to 100% and control loudness in Clubify, set Spotify normalization to *Normal* or off (the *Loud* setting applies its own limiter), and disable Spotify's equalizer. In Windows, set the output device and the virtual cable to the same format (for example 48 kHz / 24-bit) and disable audio enhancements on the output device. The DSP chain now reserves headroom, limits with 3 ms of lookahead, and saturates only the low band, but the capture dependency still delivers 16-bit audio at 48 kHz.
 
 **Desktop window is not visible**
 
@@ -211,8 +216,9 @@ Install the Rust toolchain and the Visual Studio C++ build tools with the Window
 - Windows x64 only for the supported capture path.
 - Original audio suppression depends on routing Spotify to a virtual/silent endpoint.
 - Spotify is detected by process image name, not the Spotify Web API. No login or account access is involved.
-- Output is fixed at 48 kHz stereo. Devices that cannot open 48 kHz shared mode are not resampled yet.
-- Total latency is typically above the 30 ms target because of shared-mode WASAPI, the virtual cable, and the jitter queue. Lower the safety buffer to trade stability for latency.
+- Output is float32 at 48 kHz stereo. Devices that cannot open 48 kHz in shared mode are not resampled yet.
+- Capture is limited to 16-bit 48 kHz by `loopback-capture`, which hard-codes PCM16 with `AUTOCONVERTPCM` and no `AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY`. For fully transparent capture, fork the addon to request 32-bit float through `WAVEFORMATEXTENSIBLE` and add that stream flag, then update `BlockAssembler` to read floats.
+- Total latency is typically above the 30 ms target because of shared-mode WASAPI, the virtual cable, the jitter queue, and the limiter lookahead. Lower the safety buffer to trade stability for latency.
 - The control server has no authentication because it binds to localhost. Do not expose port 8787.
 - The production package bundles Node and therefore is substantially larger than a pure Rust Tauri app.
 

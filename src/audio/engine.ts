@@ -35,10 +35,16 @@ const DISCOVERY_INTERVAL_MS = 2_000;
 const STATUS_INTERVAL_MS = 250;
 const PUMP_INTERVAL_MS = 4;
 const TAIL_INTERVAL_MS = 10;
-const SILENCE_AFTER_MS = 120;
+const STARTUP_TRIM_MS = 1_500;
 const DEVICE_CACHE_MS = 5_000;
 const OUTPUT_REOPEN_MS = 2_000;
 const RESAMPLER_MARGIN_FRAMES = 64;
+// Drift correction only exists to track clock difference between Spotify and
+// the output device, which is tens of ppm. Bending pitch even briefly is much
+// more noticeable than a slightly slower buffer-level correction.
+const DRIFT_LIMIT = 0.001;
+const DRIFT_PROPORTIONAL_GAIN = 0.002;
+const DRIFT_INTEGRAL_GAIN = 0.0006;
 
 interface CaptureDeliveryStats {
   deliveredPackets: number;
@@ -100,8 +106,11 @@ export class AudioEngine extends EventEmitter {
   private firstPacketAt = 0;
   private autoGain = 1;
   private driftIntegral = 0;
-  private smoothedQueueFrames = 0;
+  private smoothedBufferedFrames = 0;
   private driftSettled = true;
+  private lastDriftAt = 0;
+  private lastTailAt = 0;
+  private tailActive = false;
   private nativeStats: NativeOutputStats | null = null;
   private captureStats: CaptureDeliveryStats | null = null;
   private lastOutputReopenAt = 0;
@@ -349,7 +358,7 @@ export class AudioEngine extends EventEmitter {
    * Push-ahead output: every pump tops the native ring up to the configured
    * buffer with already-processed audio. A stalled event loop therefore eats
    * into the ring instead of triggering an immediate dropout, and the drift
-   * controller regulates the JS staging queue around a small target depth.
+   * controller tracks the total buffered amount.
    */
   private pumpOutput(): void {
     if (this.stopping) return;
@@ -369,15 +378,20 @@ export class AudioEngine extends EventEmitter {
     const chunk = Math.min(deficit, this.maxPushFrames);
     const available = this.queue.frames;
     if (available <= RESAMPLER_MARGIN_FRAMES) {
-      // Nothing captured yet (or playback is paused): keep the ring full with
-      // silence instead of letting native underruns accumulate. The tail pump
-      // takes over once real audio has flowed through the DSP.
-      if (!this.hasProcessedAudio || Date.now() - this.lastCaptureAt > SILENCE_AFTER_MS) {
+      // Before any audio exists, or once capture has stopped, keep the ring fed
+      // with raw silence. While Spotify is merely paused the processed tail
+      // below supplies silence instead, so it must not be preceded by this.
+      const paused =
+        this.hasProcessedAudio &&
+        this.capture.active &&
+        Date.now() - this.lastCaptureAt > 150 &&
+        stats.fillFrames < target / 4;
+      if (!this.hasProcessedAudio || !this.capture.active || paused) {
         this.pushSilence(chunk);
       }
       return;
     }
-    const ratio = this.driftRatio();
+    const ratio = this.driftRatio(stats.fillFrames + available);
     const request = Math.min(deficit, available - RESAMPLER_MARGIN_FRAMES);
     if (request <= 0) return;
     const missing = this.queue.readInto(this.pumpScratch, request, ratio);
@@ -404,38 +418,56 @@ export class AudioEngine extends EventEmitter {
     this.nativeStats = this.output.stats() ?? this.nativeStats;
   }
 
-  private driftRatio(): number {
-    const staging = Math.max(DSP_BLOCK_FRAMES, Math.round(this.targetFrames * 0.1));
-    const queued = this.queue.frames;
-    if (this.smoothedQueueFrames === 0) this.smoothedQueueFrames = queued;
-    this.smoothedQueueFrames += (queued - this.smoothedQueueFrames) * 0.08;
-    const error = (this.smoothedQueueFrames - staging) / staging;
-    const deadband = Math.max(
-      2 * DSP_BLOCK_FRAMES,
-      Math.round(this.sampleRate * 0.008),
-    );
-    if (
-      Math.abs(this.smoothedQueueFrames - staging) < deadband ||
-      this.smoothedQueueFrames === 0
-    ) {
-      if (!this.driftSettled) {
-        this.queue.settleToUnity();
-        this.driftSettled = true;
+  /**
+   * Clock-drift controller. The error is the total buffered audio (native ring
+   * plus JS staging queue) against the configured target, so a device clock
+   * that is faster than Spotify's is corrected even when the queue itself is
+   * empty. The correction is capped at 0.1% because anything more is audible
+   * as a pitch shift; real clock difference is measured in ppm.
+   */
+  private driftRatio(bufferedFrames: number): number {
+    const now = Date.now();
+    const target = Math.max(1, this.targetFrames);
+    const deadband = Math.max(2 * DSP_BLOCK_FRAMES, Math.round(this.sampleRate * 0.008));
+    const first = this.lastDriftAt === 0;
+    const elapsed = first
+      ? 0
+      : Math.min(0.25, Math.max(0, (now - this.lastDriftAt) / 1000));
+    this.lastDriftAt = now;
+    if (first) this.smoothedBufferedFrames = bufferedFrames;
+    this.smoothedBufferedFrames += (bufferedFrames - this.smoothedBufferedFrames) * 0.08;
+    const error = (this.smoothedBufferedFrames - target) / target;
+    const outside = Math.abs(this.smoothedBufferedFrames - target) > deadband;
+    if (!outside) {
+      // Hold whatever authority the integral already carries (that is the
+      // actual clock ratio) and let it decay slowly when it is no longer
+      // needed, instead of snapping the pitch back to unity at the edge.
+      this.driftIntegral *= Math.exp(-elapsed * 0.5);
+      if (Math.abs(this.driftIntegral) < 1e-6) {
         this.driftIntegral = 0;
+        if (!this.driftSettled) {
+          this.queue.settleToUnity();
+          this.driftSettled = true;
+        }
+        return 1;
       }
-      return 1;
+      this.driftSettled = false;
+      return 1 + this.driftIntegral;
     }
     this.driftSettled = false;
-    this.driftIntegral += error * 0.00008;
-    this.driftIntegral = Math.min(0.008, Math.max(-0.008, this.driftIntegral));
-    const correction = error * 0.0015 + this.driftIntegral;
-    return Math.min(1.01, Math.max(0.99, 1 + correction));
+    // Accumulate by elapsed time, not by pump invocation, so the response does
+    // not depend on event-loop timer granularity.
+    this.driftIntegral += error * elapsed * DRIFT_INTEGRAL_GAIN;
+    this.driftIntegral = Math.min(DRIFT_LIMIT, Math.max(-DRIFT_LIMIT, this.driftIntegral));
+    const correction = error * DRIFT_PROPORTIONAL_GAIN + this.driftIntegral;
+    return 1 + Math.min(DRIFT_LIMIT, Math.max(-DRIFT_LIMIT, correction));
   }
 
   private resetDrift(): void {
     this.driftIntegral = 0;
-    this.smoothedQueueFrames = 0;
+    this.smoothedBufferedFrames = 0;
     this.driftSettled = true;
+    this.lastDriftAt = 0;
   }
 
   private computeMaxPushFrames(): number {
@@ -506,6 +538,8 @@ export class AudioEngine extends EventEmitter {
     this.lastChunkCount = 0;
     this.hasProcessedAudio = false;
     this.autoGain = 1;
+    this.tailActive = false;
+    this.lastTailAt = 0;
     this.resetDrift();
     this.tapWarning = null;
     this.silencingMode = "none";
@@ -558,6 +592,8 @@ export class AudioEngine extends EventEmitter {
     });
     this.capture.stop();
     this.lastCaptureAt = Date.now();
+    this.tailActive = false;
+    this.lastTailAt = 0;
     this.silencingMode = "none";
     this.emitStatus();
   }
@@ -565,6 +601,8 @@ export class AudioEngine extends EventEmitter {
   private onCaptureChunk(pcm: Buffer): void {
     this.lastCaptureAt = Date.now();
     this.lastChunkCount += 1;
+    this.tailActive = false;
+    this.lastTailAt = 0;
     if (this.firstPacketAt === 0) this.firstPacketAt = this.lastCaptureAt;
     if (!this.hasProcessedAudio) {
       // Startup priming and capture switches are not playback dropouts.
@@ -597,6 +635,7 @@ export class AudioEngine extends EventEmitter {
     this.dsp.processBlock(left, right, frames);
     this.updateLevel(left, right, frames);
     this.queue.pushInterleaved(left, right, frames);
+    this.enforceStartupTrim();
     const maxQueued = this.targetFrames + Math.round(this.sampleRate * 0.05);
     if (this.queue.frames > maxQueued + this.targetFrames) {
       this.overruns += 1;
@@ -605,6 +644,20 @@ export class AudioEngine extends EventEmitter {
     // Capture wakes the event loop on every packet, so pumping here refills the
     // native ring on real audio cadence instead of a 15 ms-quantized timer.
     this.pumpOutput();
+  }
+
+  /**
+   * The tap buffers up to 64 ms of audio while it measures Spotify's render
+   * rate, then releases it in one burst. Absorbing that burst as buffer depth
+   * would raise latency and drive the drift controller for seconds, so the
+   * stale head is discarded once, right at stream start.
+   */
+  private enforceStartupTrim(): void {
+    if (this.firstPacketAt === 0) return;
+    if (Date.now() - this.firstPacketAt > STARTUP_TRIM_MS) return;
+    const allowance = Math.max(2 * DSP_BLOCK_FRAMES, Math.round(this.sampleRate * 0.01));
+    const surge = Math.max(4 * DSP_BLOCK_FRAMES, Math.round(this.sampleRate * 0.03));
+    if (this.queue.frames > surge) this.queue.trimTo(allowance);
   }
 
   private updateAutoGain(inputRms: number): void {
@@ -635,23 +688,49 @@ export class AudioEngine extends EventEmitter {
   }
 
   /**
-   * Replaces the tail of Spotify's stream with processed silence, which keeps
-   * the native ring fed while playback is paused or between tracks. Without it
-   * the ring would drain and native underruns would rise during a pause.
+   * Keeps the DSP running on silence while Spotify is paused or between
+   * tracks. The native ring fill is the starvation signal: the tail latches on
+   * while the ring is below half the target (or no packet has arrived for a
+   * while) and stays on until real audio resumes, so the reverb/delay tail
+   * decays in real time instead of being cut off, and the ring never drains
+   * into a counted underrun.
    */
   private pumpTail(): void {
     if (this.stopping || !this.hasProcessedAudio || !this.capture.active) return;
-    if (Date.now() - this.lastCaptureAt < SILENCE_AFTER_MS) return;
-    const staging = Math.max(512, Math.round(this.targetFrames * 0.25));
+    const now = Date.now();
+    if (!this.tailActive) {
+      const stats = this.output.stats();
+      if (stats) this.nativeStats = stats;
+      const target = Math.max(1, this.targetFrames);
+      const fill = stats?.fillFrames ?? 0;
+      const hungry = fill < target / 2;
+      const quietFor = Math.max(40, Math.round(this.config.targetBufferMs * 0.75));
+      const quiet = now - this.lastCaptureAt >= quietFor;
+      if (!hungry && !quiet) return;
+      this.tailActive = true;
+      this.lastTailAt = 0;
+    }
+    const elapsedMs =
+      this.lastTailAt === 0
+        ? TAIL_INTERVAL_MS
+        : Math.min(TAIL_INTERVAL_MS * 2, Math.max(TAIL_INTERVAL_MS, now - this.lastTailAt));
+    const staging = this.tailStagingFrames();
+    // Only enough tail audio to keep the next pump fed; extra silence would
+    // become one-time latency that the drift controller takes a minute to shed.
     if (this.queue.frames >= staging) return;
-    let remaining = Math.max(1, Math.round((this.sampleRate * TAIL_INTERVAL_MS) / 1_000));
-    while (remaining > 0 && this.queue.frames < staging) {
+    this.lastTailAt = now;
+    let remaining = Math.max(1, Math.round((this.sampleRate * elapsedMs) / 1_000));
+    while (remaining > 0) {
       const frames = Math.min(DSP_BLOCK_FRAMES, remaining);
       this.zeroLeft.fill(0);
       this.zeroRight.fill(0);
       this.processBlock(this.zeroLeft, this.zeroRight, frames);
       remaining -= frames;
     }
+  }
+
+  private tailStagingFrames(): number {
+    return Math.max(2 * DSP_BLOCK_FRAMES, Math.round(this.sampleRate * 0.01));
   }
 
   private tick(): void {

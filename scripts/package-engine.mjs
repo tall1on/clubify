@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const resources = join(root, "src-tauri", "resources");
 const engine = join(resources, "engine");
-const modules = ["loopback-capture", "audify", "bindings", "file-uri-to-path", "ws"];
+const modules = ["loopback-capture", "bindings", "file-uri-to-path", "ws"];
 
 if (!existsSync(join(root, "dist", "index.js"))) {
   console.error("dist/index.js is missing. Run `npm run build` first.");

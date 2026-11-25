@@ -91,10 +91,14 @@ export interface EngineStatus {
   captureFormat: CaptureFormat;
   bufferMs: number;
   targetBufferMs: number;
+  outputFillMs: number;
   level: AudioLevel;
   underruns: number;
   overruns: number;
   droppedChunks: number;
+  outputSilentFrames: number;
+  captureDroppedPackets: number;
+  captureDroppedBytes: number;
   lastError: string | null;
   autoGainDb: number;
   virtualCableDetected: boolean;

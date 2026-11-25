@@ -1,13 +1,11 @@
 //! Windows process-tree discovery used to find the real Spotify main process.
 
 use std::{collections::HashMap, mem::size_of};
-use windows::{
-    Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
-        },
+use windows::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
     },
 };
 

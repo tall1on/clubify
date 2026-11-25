@@ -1,12 +1,19 @@
+// napi-derive emits a zero-length array repeat with side effects for
+// `#[js_function(0)]` constructors; the expansion is sound, only noisy.
+#![allow(clippy::zero_repeat_side_effects)]
+
 use crate::capture::{lock, AudioSink, CaptureMode, CaptureOptions, Mailbox, Session};
 use napi::{
     bindgen_prelude::{Buffer, Function},
     threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode},
-    CallContext, Env, Error, JsFunction, JsNumber, JsObject, JsString, JsUndefined, JsUnknown,
-    Property, Result, Status, ValueType,
+    CallContext, Env, Error, JsBoolean, JsFunction, JsNumber, JsObject, JsString, JsUndefined,
+    JsUnknown, Property, Result, Status, ValueType,
 };
 use napi_derive::{js_function, module_exports};
 use std::sync::{Arc, Mutex, Weak};
+
+#[cfg(target_os = "windows")]
+use std::borrow::Cow;
 
 type Registry = Arc<Mutex<Vec<Weak<Session>>>>;
 
@@ -32,6 +39,120 @@ struct Capture {
     session: Option<Arc<Session>>,
     #[cfg(target_os = "windows")]
     tap: Option<(u32, String)>,
+}
+
+/// Clubify fork: native WASAPI render output with an explicit ring buffer, so
+/// JavaScript misses stall the ring instead of silently dropping audio.
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct AudioOutput {
+    session: Option<crate::output::OutputSession>,
+}
+
+#[cfg(target_os = "windows")]
+impl AudioOutput {
+    fn open(
+        &mut self,
+        env: Env,
+        device_name: Option<String>,
+        sample_rate: u32,
+    ) -> Result<JsObject> {
+        self.stop();
+        let (session, opened) =
+            crate::output::OutputSession::open(device_name.as_deref(), sample_rate)
+                .map_err(Error::from_reason)?;
+        self.session = Some(session);
+        let mut result = env.create_object()?;
+        result.set_named_property("deviceName", env.create_string(&opened.device_name)?)?;
+        result.set_named_property("sampleRate", env.create_uint32(opened.sample_rate)?)?;
+        result.set_named_property("periodFrames", env.create_uint32(opened.period_frames)?)?;
+        match opened.warning {
+            Some(warning) => result.set_named_property("warning", env.create_string(&warning)?)?,
+            None => result.set_named_property("warning", env.get_null()?)?,
+        }
+        Ok(result)
+    }
+
+    fn push(&self, data: &[u8]) -> Result<u32> {
+        let Some(session) = &self.session else {
+            return Err(Error::from_reason("Audio output is not open"));
+        };
+        if !data.len().is_multiple_of(8) {
+            return Err(Error::from_reason(
+                "Audio output expects interleaved stereo float32 frames",
+            ));
+        }
+        let dropped = match f32_samples(data) {
+            Cow::Borrowed(samples) => session.push(samples),
+            Cow::Owned(samples) => session.push(&samples),
+        };
+        Ok(dropped as u32)
+    }
+
+    fn stats(&self, env: Env) -> Result<JsObject> {
+        let Some(session) = &self.session else {
+            return Err(Error::from_reason("Audio output is not open"));
+        };
+        let stats = session.stats();
+        let mut result = env.create_object()?;
+        result.set_named_property("fillFrames", env.create_double(stats.fill_frames as f64)?)?;
+        result.set_named_property(
+            "capacityFrames",
+            env.create_double(stats.capacity_frames as f64)?,
+        )?;
+        result.set_named_property("underruns", env.create_double(stats.underruns as f64)?)?;
+        result.set_named_property(
+            "silentFrames",
+            env.create_double(stats.silent_frames as f64)?,
+        )?;
+        result.set_named_property(
+            "droppedFrames",
+            env.create_double(stats.dropped_frames as f64)?,
+        )?;
+        match stats.fatal {
+            Some(message) => result.set_named_property("fatal", env.create_string(&message)?)?,
+            None => result.set_named_property("fatal", env.get_null()?)?,
+        }
+        Ok(result)
+    }
+
+    fn reset_stats(&self) {
+        if let Some(session) = &self.session {
+            session.reset_stats();
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut session) = self.session.take() {
+            session.stop();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for AudioOutput {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn f32_samples(data: &[u8]) -> Cow<'_, [f32]> {
+    if data.len().is_multiple_of(4)
+        && (data.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f32>())
+    {
+        // SAFETY: the length is a whole number of f32 values and the pointer is
+        // aligned; every bit pattern is a valid f32.
+        Cow::Borrowed(unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const f32, data.len() / 4)
+        })
+    } else {
+        Cow::Owned(
+            data.chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .collect(),
+        )
+    }
 }
 
 fn audio_sink(
@@ -80,7 +201,8 @@ impl Capture {
         }
         let registry = registry(&mut env)?;
         let sink = audio_sink(env, callback)?;
-        let session = Session::start_with_options(mode, sink, options).map_err(Error::from_reason)?;
+        let session =
+            Session::start_with_options(mode, sink, options).map_err(Error::from_reason)?;
         let mut sessions = lock(&registry);
         sessions.retain(|session| session.strong_count() > 0);
         sessions.push(Arc::downgrade(&session));
@@ -105,13 +227,9 @@ impl Capture {
         let registry = registry(&mut env)?;
         let sink = audio_sink(env, callback)?;
         let tap_path = dll_path.clone();
-        let (session, format) = crate::tap::start_session(
-            pid,
-            std::path::Path::new(&dll_path),
-            sample_rate,
-            sink,
-        )
-        .map_err(Error::from_reason)?;
+        let (session, format) =
+            crate::tap::start_session(pid, std::path::Path::new(&dll_path), sample_rate, sink)
+                .map_err(Error::from_reason)?;
         let mut sessions = lock(&registry);
         sessions.retain(|session| session.strong_count() > 0);
         sessions.push(Arc::downgrade(&session));
@@ -131,6 +249,32 @@ impl Capture {
             let _ = crate::tap::stop(pid, std::path::Path::new(&path));
         }
         session_result
+    }
+
+    fn stats(&self, env: Env) -> Result<JsObject> {
+        let stats = self
+            .session
+            .as_ref()
+            .map(|session| session.delivery_stats())
+            .unwrap_or_default();
+        let mut result = env.create_object()?;
+        result.set_named_property(
+            "deliveredPackets",
+            env.create_double(stats.delivered_packets as f64)?,
+        )?;
+        result.set_named_property(
+            "deliveredBytes",
+            env.create_double(stats.delivered_bytes as f64)?,
+        )?;
+        result.set_named_property(
+            "droppedPackets",
+            env.create_double(stats.dropped_packets as f64)?,
+        )?;
+        result.set_named_property(
+            "droppedBytes",
+            env.create_double(stats.dropped_bytes as f64)?,
+        )?;
+        Ok(result)
     }
 }
 
@@ -186,14 +330,12 @@ fn start(ctx: CallContext) -> Result<JsUndefined> {
     };
     let callback = ctx.get::<Function<(Buffer,), JsUnknown>>(1)?.create_ref()?;
     let this: JsObject = ctx.this()?;
-    ctx.env
-        .unwrap::<Capture>(&this)?
-        .start(
-            *ctx.env,
-            CaptureMode::Include(pid),
-            callback,
-            CaptureOptions::default(),
-        )?;
+    ctx.env.unwrap::<Capture>(&this)?.start(
+        *ctx.env,
+        CaptureMode::Include(pid),
+        callback,
+        CaptureOptions::default(),
+    )?;
     ctx.env.get_undefined()
 }
 
@@ -236,17 +378,15 @@ fn start_with_format(ctx: CallContext) -> Result<JsUndefined> {
     }
     let callback = ctx.get::<Function<(Buffer,), JsUnknown>>(1)?.create_ref()?;
     let this: JsObject = ctx.this()?;
-    ctx.env
-        .unwrap::<Capture>(&this)?
-        .start(
-            *ctx.env,
-            CaptureMode::Include(pid),
-            callback,
-            CaptureOptions {
-                float32,
-                sample_rate: sample_rate as u32,
-            },
-        )?;
+    ctx.env.unwrap::<Capture>(&this)?.start(
+        *ctx.env,
+        CaptureMode::Include(pid),
+        callback,
+        CaptureOptions {
+            float32,
+            sample_rate: sample_rate as u32,
+        },
+    )?;
     ctx.env.get_undefined()
 }
 
@@ -320,12 +460,7 @@ fn start_system_audio(ctx: CallContext) -> Result<JsUndefined> {
     let this: JsObject = ctx.this()?;
     ctx.env
         .unwrap::<Capture>(&this)?
-        .start(
-            *ctx.env,
-            mode,
-            callback,
-            CaptureOptions::default(),
-        )?;
+        .start(*ctx.env, mode, callback, CaptureOptions::default())?;
     ctx.env.get_undefined()
 }
 
@@ -334,6 +469,94 @@ fn stop(ctx: CallContext) -> Result<JsUndefined> {
     let this: JsObject = ctx.this()?;
     ctx.env.unwrap::<Capture>(&this)?.stop()?;
     ctx.env.get_undefined()
+}
+
+#[js_function(1)]
+fn capture_stats(ctx: CallContext) -> Result<JsObject> {
+    let this: JsObject = ctx.this()?;
+    ctx.env.unwrap::<Capture>(&this)?.stats(*ctx.env)
+}
+
+#[cfg(target_os = "windows")]
+#[js_function(0)]
+fn output_constructor(ctx: CallContext) -> Result<JsUndefined> {
+    let mut this: JsObject = ctx.this()?;
+    ctx.env.wrap(&mut this, AudioOutput::default())?;
+    ctx.env.get_undefined()
+}
+
+#[cfg(target_os = "windows")]
+#[js_function(2)]
+fn output_open(ctx: CallContext) -> Result<JsObject> {
+    let device_name = match ctx.get::<JsUnknown>(0)?.get_type()? {
+        ValueType::String => Some(ctx.get::<JsString>(0)?.into_utf8()?.as_str()?.to_owned()),
+        ValueType::Null | ValueType::Undefined => None,
+        _ => {
+            ctx.env
+                .throw_type_error("deviceName must be a string or null", None)?;
+            return ctx.env.create_object();
+        }
+    };
+    if ctx.get::<JsUnknown>(1)?.get_type()? != ValueType::Number {
+        ctx.env
+            .throw_type_error("sampleRate must be a number", None)?;
+        return ctx.env.create_object();
+    }
+    let sample_rate = ctx.get::<JsNumber>(1)?.get_double()?;
+    if !sample_rate.is_finite()
+        || !(8_000.0..=192_000.0).contains(&sample_rate)
+        || sample_rate.fract() != 0.0
+    {
+        ctx.env.throw_range_error(
+            "sampleRate must be an integer between 8000 and 192000",
+            None,
+        )?;
+        return ctx.env.create_object();
+    }
+    let this: JsObject = ctx.this()?;
+    ctx.env
+        .unwrap::<AudioOutput>(&this)?
+        .open(*ctx.env, device_name, sample_rate as u32)
+}
+
+#[cfg(target_os = "windows")]
+#[js_function(1)]
+fn output_push(ctx: CallContext) -> Result<JsNumber> {
+    let buffer = ctx.get::<Buffer>(0)?;
+    let this: JsObject = ctx.this()?;
+    let dropped = ctx.env.unwrap::<AudioOutput>(&this)?.push(&buffer)?;
+    ctx.env.create_uint32(dropped)
+}
+
+#[cfg(target_os = "windows")]
+#[js_function(1)]
+fn output_stats(ctx: CallContext) -> Result<JsObject> {
+    let this: JsObject = ctx.this()?;
+    ctx.env.unwrap::<AudioOutput>(&this)?.stats(*ctx.env)
+}
+
+#[cfg(target_os = "windows")]
+#[js_function(1)]
+fn output_reset_stats(ctx: CallContext) -> Result<JsUndefined> {
+    let this: JsObject = ctx.this()?;
+    ctx.env.unwrap::<AudioOutput>(&this)?.reset_stats();
+    ctx.env.get_undefined()
+}
+
+#[cfg(target_os = "windows")]
+#[js_function(1)]
+fn output_stop(ctx: CallContext) -> Result<JsUndefined> {
+    let this: JsObject = ctx.this()?;
+    ctx.env.unwrap::<AudioOutput>(&this)?.stop();
+    ctx.env.get_undefined()
+}
+
+#[cfg(target_os = "windows")]
+#[js_function(1)]
+fn output_is_open(ctx: CallContext) -> Result<JsBoolean> {
+    let this: JsObject = ctx.this()?;
+    let output = ctx.env.unwrap::<AudioOutput>(&this)?;
+    ctx.env.get_boolean(output.session.is_some())
 }
 
 #[js_function(1)]
@@ -354,6 +577,7 @@ fn init(mut exports: JsObject, env: Env) -> Result<()> {
         Property::new("startWithFormat")?.with_method(start_with_format),
         Property::new("startSystemAudio")?.with_method(start_system_audio),
         Property::new("stop")?.with_method(stop),
+        Property::new("stats")?.with_method(capture_stats),
         Property::new("lastError")?.with_getter(last_error),
     ];
     #[cfg(target_os = "windows")]
@@ -364,6 +588,7 @@ fn init(mut exports: JsObject, env: Env) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         exports.set_named_property("supportsTap", true)?;
+        exports.set_named_property("supportsOutput", true)?;
         let find_process_tree = env.create_function_from_closure("findProcessTree", |ctx| {
             let image_name = ctx.get::<JsString>(0)?.into_utf8()?;
             let pids = crate::process::find_process_tree(image_name.as_str()?)
@@ -375,6 +600,50 @@ fn init(mut exports: JsObject, env: Env) -> Result<()> {
             Ok(array)
         })?;
         exports.set_named_property("findProcessTree", find_process_tree)?;
+
+        let output_properties = vec![
+            Property::new("open")?.with_method(output_open),
+            Property::new("push")?.with_method(output_push),
+            Property::new("stats")?.with_method(output_stats),
+            Property::new("resetStats")?.with_method(output_reset_stats),
+            Property::new("stop")?.with_method(output_stop),
+            Property::new("isOpen")?.with_getter(output_is_open),
+        ];
+        let output_constructor: JsFunction =
+            env.define_class("AudioOutput", output_constructor, &output_properties)?;
+        exports.set_named_property("AudioOutput", output_constructor)?;
+
+        let list_output_devices = env.create_function_from_closure("listOutputDevices", |ctx| {
+            let devices = crate::output::list_devices().map_err(Error::from_reason)?;
+            let mut array = ctx.env.create_array_with_length(devices.len())?;
+            for (index, device) in devices.iter().enumerate() {
+                let mut item = ctx.env.create_object()?;
+                item.set_named_property("name", ctx.env.create_string(&device.name)?)?;
+                item.set_named_property("isDefault", ctx.env.get_boolean(device.is_default)?)?;
+                item.set_named_property(
+                    "channels",
+                    ctx.env.create_uint32(device.channels as u32)?,
+                )?;
+                item.set_named_property("sampleRate", ctx.env.create_uint32(device.sample_rate)?)?;
+                array.set_element(index as u32, item)?;
+            }
+            Ok(array)
+        })?;
+        exports.set_named_property("listOutputDevices", list_output_devices)?;
+
+        let preferred_output_rate =
+            env.create_function_from_closure("preferredOutputRate", |ctx| {
+                let name = match ctx.get::<JsUnknown>(0)?.get_type()? {
+                    ValueType::String => {
+                        Some(ctx.get::<JsString>(0)?.into_utf8()?.as_str()?.to_owned())
+                    }
+                    _ => None,
+                };
+                let rate =
+                    crate::output::preferred_rate(name.as_deref()).map_err(Error::from_reason)?;
+                ctx.env.create_uint32(rate)
+            })?;
+        exports.set_named_property("preferredOutputRate", preferred_output_rate)?;
     }
     Ok(())
 }

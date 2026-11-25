@@ -132,6 +132,17 @@ Linux system capture uses a PipeWire input stream with `stream.capture.sink=true
 
 Process matching relies on observable ancestry and metadata. Descendants that become detached before they can be observed, namespace-translated PIDs, and audio outside the accessible PipeWire graph remain limitations. Cargo selects the backend for the build target. Platform implementations are separate Rust modules; Linux process-tree tracking is independent of Node-API.
 
+## Clubify fork additions (Windows x64)
+
+This fork adds a native render output and the Spotify tap used by Clubify:
+
+- `new loopback.AudioOutput()` — WASAPI shared-mode render output fed from JavaScript. `open(deviceName, sampleRate)` returns `{ deviceName, sampleRate, periodFrames, warning }`; `push(buffer)` takes interleaved stereo little-endian float32 frames and returns dropped frames; `stats()` returns `{ fillFrames, capacityFrames, underruns, silentFrames, droppedFrames, fatal }`; `resetStats()` clears the counters when real playback starts; `stop()` joins the render thread. The render thread never calls into V8, so a stalled event loop stretches the native ring instead of silently dropping audio.
+- `loopback.listOutputDevices()` and `loopback.preferredOutputRate(deviceName)` enumerate active render endpoints with friendly names and mix formats.
+- `capture.startWithFormat(pid, callback, "f32" | "s16", sampleRate)` delivers float32 packets.
+- `capture.stats()` returns `{ deliveredPackets, deliveredBytes, droppedPackets, droppedBytes }`; drops include a full producer ring and reader overruns.
+- `capture.startTap(pid, dllPath, callback, sampleRate)` injects `clubify_spotify_tap.dll`, waits on its named event, resamples with a polyphase Kaiser kernel when Spotify's measured render rate differs from the engine rate, and sanitizes non-finite samples in place. See the tap repository's README for the shared-memory ABI.
+- `loopback.findProcessTree(imageName)` lists matching PIDs with the real main process first.
+
 ## Testing
 
 ```sh

@@ -5,6 +5,9 @@ pub mod capture;
 mod linux;
 #[cfg(target_os = "windows")]
 #[cfg_attr(test, allow(dead_code))]
+mod output;
+#[cfg(target_os = "windows")]
+#[cfg_attr(test, allow(dead_code))]
 mod process;
 #[cfg(target_os = "windows")]
 #[cfg_attr(test, allow(dead_code))]

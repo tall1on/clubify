@@ -1,182 +1,154 @@
 import { createRequire } from "node:module";
-import type { RtAudio as RtAudioInstance } from "audify";
-import {
-  CHANNELS,
-  DEFAULT_SAMPLE_RATE,
-  OUTPUT_BLOCK_MS,
-  OUTPUT_BYTES_PER_SAMPLE,
-  type OutputDevice,
-} from "../shared/types.js";
-import { silentPcm } from "./pcm.js";
+import { DEFAULT_SAMPLE_RATE, type OutputDevice } from "../shared/types.js";
+
+interface NativeOutputDevice {
+  name: string;
+  isDefault: boolean;
+  channels: number;
+  sampleRate: number;
+}
+
+interface NativeOpened {
+  deviceName: string;
+  sampleRate: number;
+  periodFrames: number;
+  warning: string | null;
+}
+
+interface NativeOutputStats {
+  fillFrames: number;
+  capacityFrames: number;
+  underruns: number;
+  silentFrames: number;
+  droppedFrames: number;
+  fatal: string | null;
+}
+
+interface NativeAudioOutput {
+  open(deviceName: string | null, sampleRate: number): NativeOpened;
+  push(buffer: Buffer): number;
+  stats(): NativeOutputStats;
+  resetStats(): void;
+  stop(): void;
+  readonly isOpen: boolean;
+}
+
+interface NativeModule {
+  supportsOutput?: boolean;
+  AudioOutput?: new () => NativeAudioOutput;
+  listOutputDevices?: () => NativeOutputDevice[];
+  preferredOutputRate?: (deviceName: string | null) => number;
+}
 
 const require = createRequire(import.meta.url);
-const { RtAudio } = require("audify") as {
-  RtAudio: new (api?: number) => RtAudioInstance;
-};
-
-const WASAPI_API = 7;
-const FLOAT32_FORMAT = 0x10;
-const STREAM_FLAGS = 0x2 | 0x8;
-
-type AudifyDevice = ReturnType<RtAudioInstance["getDevices"]>[number];
+const native = require("loopback-capture") as NativeModule;
 
 export interface OpenOutputResult {
   device: OutputDevice;
   warning: string | null;
-  frameSize: number;
   sampleRate: number;
+  periodFrames: number;
+  capacityFrames: number;
 }
 
+export interface OutputStats {
+  fillFrames: number;
+  capacityFrames: number;
+  underruns: number;
+  silentFrames: number;
+  droppedFrames: number;
+  fatal: string | null;
+}
+
+/**
+ * Thin wrapper over the native WASAPI renderer. JavaScript pushes processed
+ * blocks into a native ring; the render thread never calls back into V8, so a
+ * busy event loop stretches the ring instead of dropping audio silently.
+ */
 export class WasapiOutput {
-  private rt: RtAudioInstance | null = null;
-  private running = false;
-  private frameSize = Math.round((DEFAULT_SAMPLE_RATE * OUTPUT_BLOCK_MS) / 1_000);
-  private silentFrame: Buffer = Buffer.alloc(
-    this.frameSize * CHANNELS * OUTPUT_BYTES_PER_SAMPLE,
-  );
-  private errorHandler: ((message: string) => void) | null = null;
+  private output: NativeAudioOutput | null = null;
+
+  get supported(): boolean {
+    return native.supportsOutput === true && typeof native.AudioOutput === "function";
+  }
+
+  get isOpen(): boolean {
+    return this.output?.isOpen === true;
+  }
 
   listDevices(): OutputDevice[] {
-    const rt = new RtAudio(WASAPI_API);
-    try {
-      return rt
-        .getDevices()
-        .filter((device: AudifyDevice) => device.outputChannels > 0)
-        .map((device: AudifyDevice) => ({
-          id: device.id,
-          name: device.name,
-          isDefault: Boolean(device.isDefaultOutput),
-          outputChannels: device.outputChannels,
-          preferredSampleRate: device.preferredSampleRate,
-        }));
-    } finally {
-      try {
-        if (rt.isStreamOpen()) rt.closeStream();
-      } catch {
-        // no stream was opened by this probe
-      }
-    }
+    if (!this.supported) throw new Error(missingNativeMessage());
+    const devices = native.listOutputDevices?.() ?? [];
+    return devices.map((device, index) => ({
+      id: index,
+      name: device.name,
+      isDefault: device.isDefault,
+      outputChannels: device.channels,
+      preferredSampleRate: device.sampleRate,
+    }));
   }
 
   preferredRate(deviceName: string | null): number {
-    const rt = new RtAudio(WASAPI_API);
+    if (!this.supported) return DEFAULT_SAMPLE_RATE;
     try {
-      const { device } = this.pickDevice(rt, deviceName);
-      return validRate(device.preferredSampleRate);
+      return validRate(native.preferredOutputRate?.(deviceName) ?? DEFAULT_SAMPLE_RATE);
     } catch {
       return DEFAULT_SAMPLE_RATE;
-    } finally {
-      try {
-        if (rt.isStreamOpen()) rt.closeStream();
-      } catch {
-        // no stream was opened by this probe
-      }
     }
   }
 
-  open(
-    deviceName: string | null,
-    sampleRate: number,
-    onFrame: (frames: number) => Buffer,
-    onError: (message: string) => void,
-  ): OpenOutputResult {
+  open(deviceName: string | null, sampleRate: number): OpenOutputResult {
+    if (!this.supported) throw new Error(missingNativeMessage());
     this.stop();
-    const rt = new RtAudio(WASAPI_API);
-    const { device, warning, defaultId } = this.pickDevice(rt, deviceName);
-    const frameSize = Math.max(1, Math.round((sampleRate * OUTPUT_BLOCK_MS) / 1_000));
-    this.silentFrame = silentPcm(frameSize);
-    const actualFrameSize = rt.openStream(
-      { deviceId: device.id, nChannels: 2, firstChannel: 0 },
-      null,
-      FLOAT32_FORMAT,
-      sampleRate,
-      frameSize,
-      "clubify",
-      null,
-      () => this.pullFrame(onFrame),
-      STREAM_FLAGS,
-      (_type: number, message: string) => {
-        if (_type <= 1) return;
-        this.errorHandler?.(`${message} (type ${_type})`);
-      },
-    );
-    this.rt = rt;
-    this.frameSize = actualFrameSize > 0 ? actualFrameSize : frameSize;
-    this.silentFrame = silentPcm(this.frameSize);
-    this.errorHandler = onError;
-    this.running = true;
-    const reportedRate = rt.getStreamSampleRate();
-    const actualRate =
-      Number.isFinite(reportedRate) && reportedRate >= 8_000
-        ? Math.round(reportedRate)
-        : sampleRate;
-    rt.write(this.silentFrame);
-    rt.write(this.silentFrame);
-    rt.write(this.silentFrame);
-    rt.start();
+    const output = new native.AudioOutput!();
+    const opened = output.open(deviceName, sampleRate);
+    this.output = output;
     return {
       device: {
-        id: device.id,
-        name: device.name,
-        isDefault: device.id === defaultId,
-        outputChannels: device.outputChannels,
-        preferredSampleRate: device.preferredSampleRate,
+        id: 0,
+        name: opened.deviceName,
+        isDefault: deviceName === null,
+        outputChannels: 2,
+        preferredSampleRate: opened.sampleRate,
       },
-      warning,
-      frameSize: this.frameSize,
-      sampleRate: actualRate,
+      warning: opened.warning,
+      sampleRate: validRate(opened.sampleRate),
+      periodFrames: opened.periodFrames,
+      capacityFrames: output.stats().capacityFrames,
     };
   }
 
-  private pickDevice(
-    rt: RtAudioInstance,
-    deviceName: string | null,
-  ): { device: AudifyDevice; warning: string | null; defaultId: number } {
-    const devices = rt.getDevices().filter((device: AudifyDevice) => device.outputChannels > 0);
-    if (devices.length === 0) {
-      throw new Error("No WASAPI output devices are available");
-    }
-    const defaultId = rt.getDefaultOutputDevice();
-    let device: AudifyDevice | undefined;
-    let warning: string | null = null;
-    if (deviceName) {
-      device = devices.find((candidate: AudifyDevice) => candidate.name === deviceName);
-      if (!device) {
-        warning = `Output device "${deviceName}" was not found; using the system default`;
-      }
-    }
-    if (!device) {
-      device =
-        devices.find((candidate: AudifyDevice) => candidate.id === defaultId) ?? devices[0]!;
-    }
-    return { device, warning, defaultId };
+  /** Copies interleaved float32 frames into the native ring. */
+  push(buffer: Buffer): number {
+    return this.output?.push(buffer) ?? 0;
   }
 
-  private pullFrame(onFrame: (frames: number) => Buffer): void {
-    if (!this.running || !this.rt) return;
+  stats(): OutputStats | null {
+    if (!this.output) return null;
     try {
-      const frame = onFrame(this.frameSize);
-      this.rt.write(frame);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.errorHandler?.(message);
+      return this.output.stats();
+    } catch {
+      return null;
+    }
+  }
+
+  /** Clears native underrun/overrun counters when real playback begins. */
+  resetStats(): void {
+    try {
+      this.output?.resetStats();
+    } catch {
+      // ignore a session that is already gone
     }
   }
 
   stop(): void {
-    this.running = false;
-    const rt = this.rt;
-    this.rt = null;
-    if (!rt) return;
+    const output = this.output;
+    this.output = null;
+    if (!output) return;
     try {
-      if (rt.isStreamRunning()) rt.stop();
+      output.stop();
     } catch {
-      // ignore driver teardown errors
-    }
-    try {
-      if (rt.isStreamOpen()) rt.closeStream();
-    } catch {
-      // ignore driver teardown errors
+      // A dead driver leaves the session inert; dropping it is enough.
     }
   }
 }
@@ -185,4 +157,8 @@ function validRate(rate: number): number {
   return Number.isFinite(rate) && rate >= 8_000 && rate <= 192_000
     ? Math.round(rate)
     : DEFAULT_SAMPLE_RATE;
+}
+
+function missingNativeMessage(): string {
+  return "The bundled native audio output is missing. Run `npm run build:capture`.";
 }

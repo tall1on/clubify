@@ -18,6 +18,13 @@ export interface CaptureStarted {
   sampleRate: number;
 }
 
+export interface CaptureDeliveryStats {
+  deliveredPackets: number;
+  deliveredBytes: number;
+  droppedPackets: number;
+  droppedBytes: number;
+}
+
 const require = createRequire(import.meta.url);
 let tapDllPath: string | null | undefined;
 
@@ -35,6 +42,16 @@ export class SpotifyCapture {
 
   get lastError(): string | null {
     return this.capture?.lastError ?? null;
+  }
+
+  /** Delivery and drop counters for the active capture session. */
+  stats(): CaptureDeliveryStats | null {
+    if (!this.capture?.stats) return null;
+    try {
+      return this.capture.stats();
+    } catch {
+      return null;
+    }
   }
 
   get supportsFloat32(): boolean {

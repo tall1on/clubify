@@ -7,7 +7,6 @@ import {
   MAX_AUTO_GAIN_DB,
   MAX_BUFFER_MS,
   MIN_BUFFER_MS,
-  OUTPUT_BLOCK_MS,
   OUTPUT_FRAME_BYTES,
   type AppConfig,
   type AudioLevel,
@@ -34,9 +33,28 @@ import {
 
 const DISCOVERY_INTERVAL_MS = 2_000;
 const STATUS_INTERVAL_MS = 250;
-const TAIL_INTERVAL_MS = 5;
-const TAIL_LIFETIME_MS = 6_000;
+const PUMP_INTERVAL_MS = 4;
+const TAIL_INTERVAL_MS = 10;
 const SILENCE_AFTER_MS = 120;
+const DEVICE_CACHE_MS = 5_000;
+const OUTPUT_REOPEN_MS = 2_000;
+const RESAMPLER_MARGIN_FRAMES = 64;
+
+interface CaptureDeliveryStats {
+  deliveredPackets: number;
+  deliveredBytes: number;
+  droppedPackets: number;
+  droppedBytes: number;
+}
+
+interface NativeOutputStats {
+  fillFrames: number;
+  capacityFrames: number;
+  underruns: number;
+  silentFrames: number;
+  droppedFrames: number;
+  fatal: string | null;
+}
 
 export class AudioEngine extends EventEmitter {
   private readonly config: AppConfig;
@@ -48,20 +66,21 @@ export class AudioEngine extends EventEmitter {
   private readonly queue = new PlaybackQueue();
   private readonly zeroLeft = new Float32Array(DSP_BLOCK_FRAMES);
   private readonly zeroRight = new Float32Array(DSP_BLOCK_FRAMES);
+  private pumpScratch = new Float32Array(DSP_BLOCK_FRAMES * 2);
+  private silencePush: Buffer = Buffer.alloc(0);
 
   private devices: OutputDevice[] = [];
+  private devicesRefreshedAt = 0;
   private outputDeviceName: string | null = null;
   private sampleRate = DEFAULT_SAMPLE_RATE;
   private captureSampleRate = DEFAULT_SAMPLE_RATE;
   private captureFormat: CaptureFormat = "f32";
   private targetFrames: number;
-  private outputPrimed = false;
-  private outputSilence: Buffer = Buffer.alloc(
-    Math.round((DEFAULT_SAMPLE_RATE * OUTPUT_BLOCK_MS) / 1_000) * OUTPUT_FRAME_BYTES,
-  );
+  private maxPushFrames: number;
   private discoveryTimer: NodeJS.Timeout | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
   private tailTimer: NodeJS.Timeout | null = null;
+  private pumpTimer: NodeJS.Timeout | null = null;
   private saveTimer: NodeJS.Timeout | null = null;
   private readonly startedAt = Date.now();
   private lastCaptureAt = 0;
@@ -74,7 +93,6 @@ export class AudioEngine extends EventEmitter {
   private silencingMode: "tap" | "cable" | "none" = "none";
   private hasProcessedAudio = false;
   private stopping = false;
-  private underruns = 0;
   private overruns = 0;
   private droppedFrames = 0;
   private smoothedPeak = 0;
@@ -82,14 +100,18 @@ export class AudioEngine extends EventEmitter {
   private firstPacketAt = 0;
   private autoGain = 1;
   private driftIntegral = 0;
-  private smoothedFillFrames = 0;
+  private smoothedQueueFrames = 0;
   private driftSettled = true;
+  private nativeStats: NativeOutputStats | null = null;
+  private captureStats: CaptureDeliveryStats | null = null;
+  private lastOutputReopenAt = 0;
 
   constructor(config: AppConfig) {
     super();
     this.config = config;
     this.customPresets = loadCustomPresets();
     this.targetFrames = Math.round((config.targetBufferMs * this.sampleRate) / 1000);
+    this.maxPushFrames = this.computeMaxPushFrames();
     this.dsp = new DspChain(this.sampleRate, config.effects, DSP_BLOCK_FRAMES);
   }
 
@@ -99,7 +121,7 @@ export class AudioEngine extends EventEmitter {
 
   async start(): Promise<void> {
     this.stopping = false;
-    this.refreshDevices();
+    this.refreshDevices(true);
     this.setSampleRate(this.output.preferredRate(this.config.outputDeviceName));
     this.openOutput();
     this.discoveryTimer = setInterval(() => {
@@ -111,6 +133,10 @@ export class AudioEngine extends EventEmitter {
     this.tailTimer = setInterval(() => {
       this.pumpTail();
     }, TAIL_INTERVAL_MS);
+    this.pumpTimer = setInterval(() => {
+      this.pumpOutput();
+    }, PUMP_INTERVAL_MS);
+    this.pumpTimer.unref();
     await this.pollSpotify();
     this.emitStatus();
   }
@@ -120,10 +146,12 @@ export class AudioEngine extends EventEmitter {
     if (this.discoveryTimer) clearInterval(this.discoveryTimer);
     if (this.statusTimer) clearInterval(this.statusTimer);
     if (this.tailTimer) clearInterval(this.tailTimer);
+    if (this.pumpTimer) clearInterval(this.pumpTimer);
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.discoveryTimer = null;
     this.statusTimer = null;
     this.tailTimer = null;
+    this.pumpTimer = null;
     this.saveTimer = null;
     this.capture.stop();
     this.output.stop();
@@ -131,8 +159,10 @@ export class AudioEngine extends EventEmitter {
     this.save();
   }
 
-  getState(refreshDevices = false): PublicState {
-    if (refreshDevices) this.refreshDevices();
+  getState(_refreshDevices = false): PublicState {
+    // The list is cached: rescanning WASAPI endpoints must never sit between a
+    // UI connect and audio processing. Explicit device changes force a refresh.
+    this.refreshDevices();
     return {
       config: this.config,
       status: this.status(),
@@ -201,7 +231,7 @@ export class AudioEngine extends EventEmitter {
     if (!Number.isFinite(ms)) throw new Error("Invalid buffer size");
     this.config.targetBufferMs = Math.min(MAX_BUFFER_MS, Math.max(MIN_BUFFER_MS, Math.round(ms)));
     this.targetFrames = Math.round((this.config.targetBufferMs * this.sampleRate) / 1000);
-    if (this.queue.frames > this.targetFrames * 4) this.queue.trimTo(this.targetFrames * 2);
+    if (this.queue.frames > this.targetFrames * 2) this.queue.trimTo(this.targetFrames);
     this.scheduleSave();
     this.emitStatus();
   }
@@ -215,7 +245,7 @@ export class AudioEngine extends EventEmitter {
   setOutputDevice(deviceName: string | null): void {
     this.config.outputDeviceName = deviceName;
     this.queue.clear();
-    this.outputPrimed = false;
+    this.nativeStats = null;
     this.capture.stop();
     this.output.stop();
     this.setSampleRate(this.output.preferredRate(deviceName));
@@ -235,48 +265,63 @@ export class AudioEngine extends EventEmitter {
     this.capture.stop();
     this.queue.clear();
     this.assembler.reset();
-    this.outputPrimed = false;
     this.firstPacketAt = 0;
     this.hasProcessedAudio = false;
-    this.driftIntegral = 0;
-    this.smoothedFillFrames = 0;
-    this.driftSettled = true;
+    this.resetDrift();
     void this.pollSpotify();
     this.emitStatus();
   }
 
-  private refreshDevices(): void {
+  private refreshDevices(force = false): void {
+    const now = Date.now();
+    if (!force && this.devices.length > 0 && now - this.devicesRefreshedAt < DEVICE_CACHE_MS) {
+      return;
+    }
+    if (!this.output.supported) {
+      this.devices = [];
+      return;
+    }
     try {
       this.devices = this.output.listDevices();
+      this.devicesRefreshedAt = now;
     } catch (error) {
-      this.devices = [];
-      this.outputError = errorMessage(error);
+      this.devicesRefreshedAt = now;
+      if (this.devices.length === 0) this.outputError = errorMessage(error);
     }
   }
 
   private openOutput(): void {
+    if (!this.output.supported) {
+      this.outputError =
+        "The native audio output is missing. Run `npm run build:capture` and restart.";
+      this.outputDeviceName = null;
+      return;
+    }
     try {
-      const result = this.output.open(
-        this.config.outputDeviceName,
-        this.sampleRate,
-        (frames) => this.onOutputFrame(frames),
-        (message) => {
-          this.outputError = message;
-          this.emitStatus();
-        },
-      );
-      if (result.sampleRate !== this.sampleRate) {
-        this.setSampleRate(result.sampleRate);
-      }
+      const result = this.output.open(this.config.outputDeviceName, this.sampleRate);
       this.outputDeviceName = result.device.name;
-      this.outputSilence = silentPcm(result.frameSize);
       this.warning = result.warning;
       this.outputError = null;
-      this.refreshDevices();
+      this.nativeStats = null;
+      this.allocatePumpScratch();
+      this.primeOutput();
+      this.refreshDevices(true);
     } catch (error) {
       this.outputError = errorMessage(error);
       this.outputDeviceName = null;
+      this.nativeStats = null;
     }
+  }
+
+  /**
+   * Fills the native ring with silence so opening the stream does not count
+   * startup gaps as underruns. The tail pump keeps it topped up until Spotify
+   * starts producing real audio.
+   */
+  private primeOutput(): void {
+    const fill = this.output.stats()?.fillFrames ?? 0;
+    const frames = Math.max(0, this.targetFrames - fill);
+    if (frames > 0) this.output.push(silentPcm(frames));
   }
 
   private setSampleRate(rate: number): void {
@@ -288,13 +333,11 @@ export class AudioEngine extends EventEmitter {
     this.sampleRate = next;
     this.captureSampleRate = next;
     this.targetFrames = Math.round((this.config.targetBufferMs * next) / 1_000);
+    this.maxPushFrames = this.computeMaxPushFrames();
+    this.allocatePumpScratch();
     this.dsp = new DspChain(next, this.config.effects, DSP_BLOCK_FRAMES);
-    this.outputSilence = silentPcm(Math.round((next * OUTPUT_BLOCK_MS) / 1_000));
     this.queue.clear();
-    this.outputPrimed = false;
-    this.smoothedFillFrames = 0;
-    this.driftIntegral = 0;
-    this.driftSettled = true;
+    this.resetDrift();
     if (this.capture.active) {
       const pid = this.capture.pid;
       this.capture.stop();
@@ -302,30 +345,79 @@ export class AudioEngine extends EventEmitter {
     }
   }
 
-  private onOutputFrame(frames: number): Buffer {
-    if (!this.outputPrimed) {
-      if (this.queue.frames >= this.targetFrames) {
-        this.outputPrimed = true;
-        this.smoothedFillFrames = this.queue.frames;
-      } else {
-        return this.silence(frames);
+  /**
+   * Push-ahead output: every pump tops the native ring up to the configured
+   * buffer with already-processed audio. A stalled event loop therefore eats
+   * into the ring instead of triggering an immediate dropout, and the drift
+   * controller regulates the JS staging queue around a small target depth.
+   */
+  private pumpOutput(): void {
+    if (this.stopping) return;
+    const stats = this.output.stats();
+    if (!stats) return;
+    this.nativeStats = stats;
+    if (stats.fatal) {
+      if (this.outputError !== stats.fatal) {
+        this.outputError = stats.fatal;
+        this.emitStatus();
       }
+      return;
+    }
+    const target = Math.max(1, this.targetFrames);
+    const deficit = target - stats.fillFrames;
+    if (deficit <= 0) return;
+    const chunk = Math.min(deficit, this.maxPushFrames);
+    const available = this.queue.frames;
+    if (available <= RESAMPLER_MARGIN_FRAMES) {
+      // Nothing captured yet (or playback is paused): keep the ring full with
+      // silence instead of letting native underruns accumulate. The tail pump
+      // takes over once real audio has flowed through the DSP.
+      if (!this.hasProcessedAudio || Date.now() - this.lastCaptureAt > SILENCE_AFTER_MS) {
+        this.pushSilence(chunk);
+      }
+      return;
     }
     const ratio = this.driftRatio();
-    const read = this.queue.read(frames, ratio);
-    if (read.missingFrames > 0) {
-      this.underruns += 1;
-      this.outputPrimed = false;
+    const request = Math.min(deficit, available - RESAMPLER_MARGIN_FRAMES);
+    if (request <= 0) return;
+    const missing = this.queue.readInto(this.pumpScratch, request, ratio);
+    if (missing > 0) return;
+    const buffer = interleavedToBuffer(this.pumpScratch.subarray(0, request * 2));
+    const dropped = this.output.push(buffer);
+    if (dropped > 0) {
+      this.overruns += 1;
+      this.droppedFrames += dropped;
     }
-    return interleavedToBuffer(read.data);
+    this.nativeStats = this.output.stats() ?? this.nativeStats;
+  }
+
+  private pushSilence(frames: number): void {
+    const needed = frames * OUTPUT_FRAME_BYTES;
+    if (this.silencePush.length < needed) {
+      this.silencePush = Buffer.alloc(this.maxPushFrames * OUTPUT_FRAME_BYTES);
+    }
+    const dropped = this.output.push(this.silencePush.subarray(0, needed));
+    if (dropped > 0) {
+      this.overruns += 1;
+      this.droppedFrames += dropped;
+    }
+    this.nativeStats = this.output.stats() ?? this.nativeStats;
   }
 
   private driftRatio(): number {
-    const target = Math.max(1, this.targetFrames);
-    if (this.smoothedFillFrames === 0) this.smoothedFillFrames = this.queue.frames;
-    this.smoothedFillFrames += (this.queue.frames - this.smoothedFillFrames) * 0.05;
-    const error = (this.smoothedFillFrames - target) / target;
-    if (Math.abs(error) < 0.12) {
+    const staging = Math.max(DSP_BLOCK_FRAMES, Math.round(this.targetFrames * 0.1));
+    const queued = this.queue.frames;
+    if (this.smoothedQueueFrames === 0) this.smoothedQueueFrames = queued;
+    this.smoothedQueueFrames += (queued - this.smoothedQueueFrames) * 0.08;
+    const error = (this.smoothedQueueFrames - staging) / staging;
+    const deadband = Math.max(
+      2 * DSP_BLOCK_FRAMES,
+      Math.round(this.sampleRate * 0.008),
+    );
+    if (
+      Math.abs(this.smoothedQueueFrames - staging) < deadband ||
+      this.smoothedQueueFrames === 0
+    ) {
       if (!this.driftSettled) {
         this.queue.settleToUnity();
         this.driftSettled = true;
@@ -334,17 +426,33 @@ export class AudioEngine extends EventEmitter {
       return 1;
     }
     this.driftSettled = false;
-    this.driftIntegral += error * 0.0002;
-    this.driftIntegral = Math.min(0.01, Math.max(-0.01, this.driftIntegral));
-    const correction = error * 0.004 + this.driftIntegral;
+    this.driftIntegral += error * 0.00008;
+    this.driftIntegral = Math.min(0.008, Math.max(-0.008, this.driftIntegral));
+    const correction = error * 0.0015 + this.driftIntegral;
     return Math.min(1.01, Math.max(0.99, 1 + correction));
   }
 
-  private silence(frames: number): Buffer {
-    if (this.outputSilence.length !== frames * OUTPUT_FRAME_BYTES) {
-      this.outputSilence = silentPcm(frames);
+  private resetDrift(): void {
+    this.driftIntegral = 0;
+    this.smoothedQueueFrames = 0;
+    this.driftSettled = true;
+  }
+
+  private computeMaxPushFrames(): number {
+    // A single pump may refill the whole configured buffer, so bursty capture
+    // delivery cannot outrun the refill rate.
+    return Math.max(
+      DSP_BLOCK_FRAMES,
+      Math.round((this.sampleRate * MAX_BUFFER_MS) / 1_000),
+    );
+  }
+
+  private allocatePumpScratch(): void {
+    const frames = this.computeMaxPushFrames();
+    this.maxPushFrames = frames;
+    if (this.pumpScratch.length !== frames * 2) {
+      this.pumpScratch = new Float32Array(frames * 2);
     }
-    return this.outputSilence;
   }
 
   private async pollSpotify(): Promise<void> {
@@ -393,15 +501,12 @@ export class AudioEngine extends EventEmitter {
     this.captureSampleRate = this.sampleRate;
     this.assembler = new BlockAssembler(DSP_BLOCK_FRAMES, this.captureFormat);
     this.queue.clear();
-    this.outputPrimed = false;
     this.firstPacketAt = 0;
     this.lastCaptureAt = Date.now();
     this.lastChunkCount = 0;
     this.hasProcessedAudio = false;
     this.autoGain = 1;
-    this.driftIntegral = 0;
-    this.smoothedFillFrames = 0;
-    this.driftSettled = true;
+    this.resetDrift();
     this.tapWarning = null;
     this.silencingMode = "none";
     try {
@@ -453,7 +558,6 @@ export class AudioEngine extends EventEmitter {
     });
     this.capture.stop();
     this.lastCaptureAt = Date.now();
-    this.outputPrimed = false;
     this.silencingMode = "none";
     this.emitStatus();
   }
@@ -462,6 +566,11 @@ export class AudioEngine extends EventEmitter {
     this.lastCaptureAt = Date.now();
     this.lastChunkCount += 1;
     if (this.firstPacketAt === 0) this.firstPacketAt = this.lastCaptureAt;
+    if (!this.hasProcessedAudio) {
+      // Startup priming and capture switches are not playback dropouts.
+      this.output.resetStats();
+      this.nativeStats = null;
+    }
     this.hasProcessedAudio = true;
     this.assembler.push(pcm, (left, right, frames) => {
       this.processBlock(left, right, frames);
@@ -488,14 +597,14 @@ export class AudioEngine extends EventEmitter {
     this.dsp.processBlock(left, right, frames);
     this.updateLevel(left, right, frames);
     this.queue.pushInterleaved(left, right, frames);
-    const maxFrames = Math.max(
-      this.targetFrames * 4,
-      this.targetFrames + Math.round(this.sampleRate * 0.05),
-    );
-    if (this.queue.frames > maxFrames) {
+    const maxQueued = this.targetFrames + Math.round(this.sampleRate * 0.05);
+    if (this.queue.frames > maxQueued + this.targetFrames) {
       this.overruns += 1;
-      this.droppedFrames += this.queue.trimTo(this.targetFrames * 2);
+      this.droppedFrames += this.queue.trimTo(maxQueued);
     }
+    // Capture wakes the event loop on every packet, so pumping here refills the
+    // native ring on real audio cadence instead of a 15 ms-quantized timer.
+    this.pumpOutput();
   }
 
   private updateAutoGain(inputRms: number): void {
@@ -525,20 +634,23 @@ export class AudioEngine extends EventEmitter {
     this.smoothedPower += (power - this.smoothedPower) * 0.15;
   }
 
+  /**
+   * Replaces the tail of Spotify's stream with processed silence, which keeps
+   * the native ring fed while playback is paused or between tracks. Without it
+   * the ring would drain and native underruns would rise during a pause.
+   */
   private pumpTail(): void {
-    if (this.stopping || !this.hasProcessedAudio) return;
-    const now = Date.now();
-    const silenceFor = now - this.lastCaptureAt;
-    if (silenceFor < SILENCE_AFTER_MS || silenceFor > TAIL_LIFETIME_MS) return;
-    if (this.queue.frames >= this.targetFrames) return;
+    if (this.stopping || !this.hasProcessedAudio || !this.capture.active) return;
+    if (Date.now() - this.lastCaptureAt < SILENCE_AFTER_MS) return;
+    const staging = Math.max(512, Math.round(this.targetFrames * 0.25));
+    if (this.queue.frames >= staging) return;
     let remaining = Math.max(1, Math.round((this.sampleRate * TAIL_INTERVAL_MS) / 1_000));
-    while (remaining > 0) {
+    while (remaining > 0 && this.queue.frames < staging) {
       const frames = Math.min(DSP_BLOCK_FRAMES, remaining);
       this.zeroLeft.fill(0);
       this.zeroRight.fill(0);
       this.processBlock(this.zeroLeft, this.zeroRight, frames);
       remaining -= frames;
-      if (this.queue.frames >= this.targetFrames) break;
     }
   }
 
@@ -546,8 +658,15 @@ export class AudioEngine extends EventEmitter {
     if (this.capture.active && this.capture.lastError) {
       this.captureError = this.capture.lastError;
       this.capture.stop();
-      this.outputPrimed = false;
       this.queue.clear();
+    }
+    this.captureStats = this.capture.stats();
+    if (this.outputError) {
+      const now = Date.now();
+      if (this.output.supported && now - this.lastOutputReopenAt >= OUTPUT_REOPEN_MS) {
+        this.lastOutputReopenAt = now;
+        this.openOutput();
+      }
     }
     this.emitStatus();
   }
@@ -556,10 +675,7 @@ export class AudioEngine extends EventEmitter {
     if (this.outputError) return "error";
     if (this.captureError && !this.capture.active) return "error";
     if (!this.capture.active) return "waiting-for-spotify";
-    if (this.outputPrimed) return "running";
-    if (this.lastChunkCount === 0 && Date.now() - this.lastCaptureAt > 1_500) {
-      return "waiting-for-spotify";
-    }
+    if (this.hasProcessedAudio && Date.now() - this.lastCaptureAt < 1_000) return "running";
     return "buffering";
   }
 
@@ -584,23 +700,28 @@ export class AudioEngine extends EventEmitter {
             : this.config.effects.effectsEnabled
               ? "Open Spotify and start playback"
               : "Bypassed");
+    const fillFrames = this.nativeStats?.fillFrames ?? 0;
     return {
       phase,
       message,
       spotifyPids: this.spotifyPids,
       capturePid: this.capture.pid,
       captureActive: this.capture.active,
-      outputActive: this.outputDeviceName !== null,
+      outputActive: this.output.isOpen,
       outputDeviceName: this.outputDeviceName,
       sampleRate: this.sampleRate,
       captureSampleRate: this.captureSampleRate,
       captureFormat: this.captureFormat,
-      bufferMs: Math.round((this.queue.frames / this.sampleRate) * 1000),
+      bufferMs: Math.round(((this.queue.frames + fillFrames) / this.sampleRate) * 1000),
       targetBufferMs: this.config.targetBufferMs,
+      outputFillMs: Math.round((fillFrames / this.sampleRate) * 1000),
       level,
-      underruns: this.underruns,
+      underruns: this.nativeStats?.underruns ?? 0,
       overruns: this.overruns,
       droppedChunks: this.droppedFrames,
+      outputSilentFrames: this.nativeStats?.silentFrames ?? 0,
+      captureDroppedPackets: this.captureStats?.droppedPackets ?? 0,
+      captureDroppedBytes: this.captureStats?.droppedBytes ?? 0,
       lastError,
       autoGainDb: Math.round(20 * Math.log10(this.autoGain) * 10) / 10,
       virtualCableDetected: this.virtualCableDetected(),
@@ -671,4 +792,3 @@ function customPresetAccent(name: string): string {
   }
   return CUSTOM_PRESET_ACCENTS[hash % CUSTOM_PRESET_ACCENTS.length]!;
 }
-

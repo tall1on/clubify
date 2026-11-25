@@ -45,10 +45,19 @@ export class BlockAssembler {
       const available = this.blockFrames - this.carryLength;
       const count = Math.min(available, frames - offset);
       if (this.format === "f32") {
-        for (let index = 0; index < count; index += 1) {
-          const frameOffset = (offset + index) * frameBytes;
-          this.carryLeft[this.carryLength + index] = pcm.readFloatLE(frameOffset);
-          this.carryRight[this.carryLength + index] = pcm.readFloatLE(frameOffset + 4);
+        const view = float32View(pcm);
+        if (view) {
+          for (let index = 0; index < count; index += 1) {
+            const source = (offset + index) * 2;
+            this.carryLeft[this.carryLength + index] = view[source]!;
+            this.carryRight[this.carryLength + index] = view[source + 1]!;
+          }
+        } else {
+          for (let index = 0; index < count; index += 1) {
+            const frameOffset = (offset + index) * frameBytes;
+            this.carryLeft[this.carryLength + index] = pcm.readFloatLE(frameOffset);
+            this.carryRight[this.carryLength + index] = pcm.readFloatLE(frameOffset + 4);
+          }
         }
       } else {
         for (let index = 0; index < count; index += 1) {
@@ -84,8 +93,7 @@ export function interleave(
   left: Float32Array,
   right: Float32Array,
   frames: number,
-): Float32Array {
-  const output = new Float32Array(frames * 2);
+): Float32Array {  const output = new Float32Array(frames * 2);
   for (let index = 0; index < frames; index += 1) {
     output[index * 2] = left[index]!;
     output[index * 2 + 1] = right[index]!;
@@ -95,6 +103,16 @@ export function interleave(
 
 export function interleavedToBuffer(samples: Float32Array): Buffer {
   return Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
+}
+
+/**
+ * Zero-copy view over a native float32 packet when its pointer is aligned.
+ * Falls back to `readFloatLE` otherwise, which also covers pooled buffers with
+ * an odd byte offset.
+ */
+function float32View(pcm: Buffer): Float32Array | null {
+  if (pcm.byteOffset % 4 !== 0 || pcm.byteLength % 4 !== 0) return null;
+  return new Float32Array(pcm.buffer as ArrayBuffer, pcm.byteOffset, pcm.byteLength / 4);
 }
 
 export function silentPcm(frames: number, cached?: Buffer): Buffer {

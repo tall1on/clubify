@@ -383,38 +383,6 @@ function collectRuntimePackages() {
     });
   }
 
-  const nativeLibraries = [
-    {
-      name: "Opus",
-      license: "BSD-3-Clause",
-      homepage: "https://opus-codec.org",
-      directory: join(root, "node_modules", "audify", "vendor", "opus"),
-      note: "Compiled into audify's native audio addon.",
-    },
-    {
-      name: "RtAudio",
-      license: "MIT",
-      homepage: "https://github.com/thestk/rtaudio",
-      directory: join(root, "node_modules", "audify", "vendor", "rtaudio"),
-      note: "Compiled into audify's native audio addon.",
-    },
-  ];
-
-  for (const library of nativeLibraries) {
-    if (!existsSync(library.directory)) continue;
-    const licenseTexts = readLicenseFiles(library.directory);
-    if (licenseTexts.length === 0) continue;
-    entries.push({
-      name: library.name,
-      version: "",
-      ecosystem: "runtime",
-      license: library.license,
-      homepage: library.homepage,
-      note: library.note,
-      licenseTexts,
-    });
-  }
-
   return entries;
 }
 

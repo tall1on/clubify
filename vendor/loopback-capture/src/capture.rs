@@ -2,7 +2,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc, Mutex, MutexGuard,
     },
@@ -58,6 +58,10 @@ pub struct Mailbox {
     active: AtomicBool,
     pending: Mutex<Pending>,
     error: Mutex<Option<String>>,
+    delivered_packets: AtomicU64,
+    delivered_bytes: AtomicU64,
+    dropped_packets: AtomicU64,
+    dropped_bytes: AtomicU64,
 }
 
 impl Mailbox {
@@ -66,6 +70,10 @@ impl Mailbox {
             active: AtomicBool::new(true),
             pending: Mutex::new(Pending::default()),
             error: Mutex::new(None),
+            delivered_packets: AtomicU64::new(0),
+            delivered_bytes: AtomicU64::new(0),
+            dropped_packets: AtomicU64::new(0),
+            dropped_bytes: AtomicU64::new(0),
         })
     }
 
@@ -75,14 +83,52 @@ impl Mailbox {
 
     /// Returns whether a single coalesced JS wakeup must be scheduled.
     fn push(&self, packet: Vec<u8>) -> bool {
-        let mut pending = lock(&self.pending);
-        if !self.active() || packet.is_empty() || pending.packets.len() == QUEUE_CAPACITY {
+        if packet.is_empty() {
             return false;
         }
+        let mut pending = lock(&self.pending);
+        if !self.active() {
+            return false;
+        }
+        if pending.packets.len() == QUEUE_CAPACITY {
+            drop(pending);
+            self.note_dropped(packet.len());
+            return false;
+        }
+        self.delivered_packets.fetch_add(1, Ordering::Relaxed);
+        self.delivered_bytes
+            .fetch_add(packet.len() as u64, Ordering::Relaxed);
         pending.packets.push_back(packet);
         let notify = !pending.notified;
         pending.notified = true;
         notify
+    }
+
+    /// Records audio dropped before or after the mailbox (for example a full
+    /// producer ring or an overrun reader). Keeps the shared status counters.
+    pub fn note_dropped(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        self.dropped_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn delivered_packets(&self) -> u64 {
+        self.delivered_packets.load(Ordering::Relaxed)
+    }
+
+    pub fn delivered_bytes(&self) -> u64 {
+        self.delivered_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn dropped_packets(&self) -> u64 {
+        self.dropped_packets.load(Ordering::Relaxed)
+    }
+
+    pub fn dropped_bytes(&self) -> u64 {
+        self.dropped_bytes.load(Ordering::Relaxed)
     }
 
     pub fn drain(&self) -> VecDeque<Vec<u8>> {
@@ -126,12 +172,25 @@ impl AudioSink {
         }
         self.active()
     }
+
+    /// Accounts for audio dropped inside a backend before it reached the sink.
+    pub fn note_dropped(&self, bytes: usize) {
+        self.mailbox.note_dropped(bytes);
+    }
 }
 
 struct Worker {
     stop: Sender<()>,
     finished: Receiver<()>,
     thread: JoinHandle<Result<(), String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeliveryStats {
+    pub delivered_packets: u64,
+    pub delivered_bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
 }
 
 pub struct Session {
@@ -263,6 +322,15 @@ impl Session {
 
     pub fn error(&self) -> Option<String> {
         self.mailbox.error()
+    }
+
+    pub fn delivery_stats(&self) -> DeliveryStats {
+        DeliveryStats {
+            delivered_packets: self.mailbox.delivered_packets(),
+            delivered_bytes: self.mailbox.delivered_bytes(),
+            dropped_packets: self.mailbox.dropped_packets(),
+            dropped_bytes: self.mailbox.dropped_bytes(),
+        }
     }
 }
 

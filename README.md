@@ -162,7 +162,7 @@ Open http://127.0.0.1:8787 to control the engine from the browser.
 ## Third-party components
 
 - [loopback-capture](https://github.com/WerdoxDev/loopback-capture) — MIT, vendored fork under `vendor/loopback-capture`; adds float32 capture, an explicit sample rate, `SRC_DEFAULT_QUALITY`, silence-preserving delivery, the Spotify tap injector/reader, and adaptive render-rate resampling.
-- `vendor/spotify-tap` — MIT, synced copy of the separate `spotify-tap` project; in-process Spotify render tap and shared-memory ABI.
+- [spotify-tap](https://github.com/tall1on/spotify-tap) — MIT, separate project synced into `vendor/spotify-tap`; in-process Spotify render tap and shared-memory ABI.
 - [windows-rs](https://github.com/microsoft/windows-rs) — MIT/Apache-2.0, Windows API bindings used by the capture addon and tap.
 - [audify](https://github.com/almoghamdani/audify) — MIT, RtAudio/WASAPI output and Opus bindings.
 - [node-addon-api](https://github.com/nodejs/node-addon-api) — MIT, compiled into audify's native addon.

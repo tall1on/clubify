@@ -102,6 +102,7 @@ jobs:
         run: npm run package:engine
 
       - name: Build the installer and upload release assets
+        id: tauri
         if: steps.version.outputs.bumped == 'true'
         uses: tauri-apps/tauri-action@v1
         env:
@@ -131,13 +132,36 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $tag = "${{ steps.version.outputs.tag }}"
+          $releaseId = "${{ steps.tauri.outputs.releaseId }}"
+          $base = "https://api.github.com/repos/${{ github.repository }}/releases"
           $headers = @{
             Authorization = "Bearer $env:GITHUB_TOKEN"
             Accept = "application/vnd.github+json"
             "X-GitHub-Api-Version" = "2022-11-28"
           }
 
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
+          # Draft releases have no git tag yet, so GET /releases/tags/$tag returns 404.
+          # Use the release id reported by tauri-action and fall back to the release list.
+          $release = $null
+          if ($releaseId) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                $release = Invoke-RestMethod -Uri "$base/$releaseId" -Headers $headers
+                break
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Output "Release lookup failed (attempt $attempt): $($_.Exception.Message). Retrying in 10s."
+                Start-Sleep -Seconds 10
+              }
+            }
+          } else {
+            $release = @(Invoke-RestMethod -Uri "$base?per_page=100" -Headers $headers |
+              Where-Object { $_.tag_name -eq $tag }) | Select-Object -First 1
+          }
+
+          if (-not $release) {
+            throw "Could not find a release for $tag. tauri-action reported no release id and no release matches the tag."
+          }
 
           $assets = @($release.assets)
           $installer = $assets | Where-Object { $_.name -like "*-setup.exe" }

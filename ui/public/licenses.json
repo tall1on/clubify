@@ -10,7 +10,7 @@
   "note": "Generated file. Do not edit by hand. Run `npm run licenses:generate` to refresh after changing npm or Cargo dependencies.",
   "project": {
     "name": "Clubify",
-    "version": "0.2.2",
+    "version": "0.2.3",
     "license": "GPL-3.0",
     "copyright": "Copyright (C) 2026 Luke Grandke",
     "homepage": "https://github.com/tall1on/clubify",

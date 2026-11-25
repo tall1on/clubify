@@ -4,7 +4,7 @@
     "private": true,
     "description": "Spotify-only nightclub DSP for Windows",
     "author": "Luke Grandke",
-    "license": "GPL-3.0-only",
+    "license": "GPL-3.0",
     "repository": "https://github.com/tall1on/clubify",
     "type": "module",
     "main": "dist/index.js",

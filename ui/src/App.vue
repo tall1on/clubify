@@ -437,7 +437,7 @@ onBeforeUnmount(() => engine.disconnect());
       <span>Club DSP</span>
       <span class="arrow">→</span>
       <span>WASAPI out</span>
-      <span class="license-note">GPLv3 licensed · © 2026 Luke Grandke</span>
+      <span class="license-note">GNU GPLv3 licensed · © 2026 Luke Grandke</span>
       <span class="connection" :class="connection">
         {{ connection === "open" ? "LIVE" : connection.toUpperCase() }}
       </span>

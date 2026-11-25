@@ -34,8 +34,9 @@ const packages = computed(() => data.value?.packages ?? []);
 const project = computed(() => data.value?.project ?? null);
 
 const PROJECT_LICENSE_LABELS: Record<string, string> = {
-  "GPL-3.0-only": "GPLv3",
-  "GPL-3.0-or-later": "GPLv3 or later",
+  "GPL-3.0": "GNU General Public License v3.0",
+  "GPL-3.0-only": "GNU General Public License v3.0",
+  "GPL-3.0-or-later": "GNU General Public License v3.0 or later",
 };
 
 const projectLicenseLabel = computed(() => {
@@ -99,14 +100,14 @@ function onEntryToggle(entry: LicensePackage, event: Event) {
         <div class="section-heading">
           <div>
             <p class="eyebrow">PROJECT LICENSE</p>
-            <h3 v-if="project">{{ project.name }} is {{ projectLicenseLabel }} licensed</h3>
+            <h3 v-if="project">{{ project.name }} is licensed under the {{ projectLicenseLabel }}</h3>
             <h3 v-else>Project license</h3>
           </div>
           <span class="fine-print">{{ project?.copyright ?? "See LICENSE" }}</span>
         </div>
         <template v-if="project">
           <p class="license-intro">
-            Clubify is free software distributed under the {{ projectLicenseLabel }} license.
+            Clubify is free software distributed under the {{ projectLicenseLabel }}.
             It comes with no warranty, to the extent permitted by law. The full text below
             governs use, copying, modification, and distribution of the project.
           </p>

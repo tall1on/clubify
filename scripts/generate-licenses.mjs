@@ -466,7 +466,7 @@ function main() {
     project: {
       name: "Clubify",
       version: packageJson.version,
-      license: licenseValue(packageJson.license) ?? "GPL-3.0-only",
+      license: licenseValue(packageJson.license) ?? "GPL-3.0",
       copyright,
       homepage: homepageValue(packageJson),
       text: licenseText,

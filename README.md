@@ -155,7 +155,7 @@ Open http://127.0.0.1:8787 to control the engine from the browser.
 
 ## License
 
-Clubify is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License v3.0](LICENSE) (**GPL-3.0-only**). Copyright (C) 2026 Luke Grandke.
+Clubify is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License v3.0](LICENSE) (**GPL-3.0**). Copyright (C) 2026 Luke Grandke.
 
 This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [LICENSE](LICENSE) file for the full terms.
 

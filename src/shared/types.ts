@@ -98,6 +98,7 @@ export interface EngineStatus {
   lastError: string | null;
   autoGainDb: number;
   virtualCableDetected: boolean;
+  silencingMode: "tap" | "cable" | "none";
   uptimeSec: number;
 }
 

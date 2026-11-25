@@ -301,13 +301,18 @@ function readCargoPackages() {
   const manifests = [
     join(root, "src-tauri", "Cargo.toml"),
     join(root, "vendor", "loopback-capture", "Cargo.toml"),
+    join(root, "vendor", "spotify-tap", "Cargo.toml"),
   ];
   const entries = [];
   for (const manifestPath of manifests) {
     if (!existsSync(manifestPath)) continue;
     const result = readCargoManifest(manifestPath);
     if (result.error) {
-      const label = manifestPath.includes("vendor") ? "loopback-capture" : "src-tauri";
+      const label = manifestPath.includes("spotify-tap")
+        ? "spotify-tap"
+        : manifestPath.includes("loopback-capture")
+          ? "loopback-capture"
+          : "src-tauri";
       return { entries: [], error: `${label}: ${result.error}` };
     }
     entries.push(...result.entries);
@@ -363,6 +368,20 @@ function collectRuntimePackages() {
       "Bundled Node.js runtime. The Node.js license is installed with the app as NODE-LICENSE.",
     licenseTexts: [nodeLicense],
   });
+
+  const tapLicense = readFirstText([join(root, "vendor", "spotify-tap", "LICENSE")]);
+  if (tapLicense) {
+    entries.push({
+      name: "spotify-tap",
+      version: "0.1.0",
+      ecosystem: "runtime",
+      license: "MIT",
+      homepage: "",
+      note:
+        "Injected Spotify render tap. Source is maintained in a separate repository and vendored for builds.",
+      licenseTexts: [tapLicense],
+    });
+  }
 
   const nativeLibraries = [
     {

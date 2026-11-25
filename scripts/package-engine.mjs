@@ -31,8 +31,13 @@ for (const name of modules) {
   const destination = join(engine, "node_modules", name);
   if (name === "loopback-capture") {
     const addon = join(source, "build", "Release", "loopback_capture_addon.node");
+    const tap = join(source, "build", "Release", "clubify_spotify_tap.dll");
     if (!existsSync(addon)) {
       console.error("Missing loopback-capture native build. Run `npm run build:capture`.");
+      process.exit(1);
+    }
+    if (!existsSync(tap)) {
+      console.error("Missing Spotify tap native build. Run `npm run build:tap`.");
       process.exit(1);
     }
     mkdirSync(destination, { recursive: true });

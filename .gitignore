@@ -9,6 +9,8 @@ vendor/loopback-capture/node_modules/
 /src-tauri/resources/
 /src-tauri/gen/
 /vendor/loopback-capture/target/
+/vendor/spotify-tap/target/
+/vendor/spotify-tap/dist/
 
 # TypeScript and test caches
 *.tsbuildinfo
@@ -25,5 +27,6 @@ vendor/loopback-capture/node_modules/
 Thumbs.db
 desktop.ini
 
-# Note: vendor/loopback-capture/dist and build/Release are intentionally tracked
-# so the patched capture addon ships prebuilt.
+# Note: vendor/loopback-capture/dist, build/Release, and the prebuilt
+# clubify_spotify_tap.dll are intentionally tracked so the patched capture
+# addon and Spotify tap ship prebuilt.

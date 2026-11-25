@@ -1,10 +1,25 @@
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
+
+interface NativeDiscovery {
+  findProcessTree?: (imageName: string) => number[];
+}
 
 export async function findSpotifyPids(imageName = "Spotify.exe"): Promise<number[]> {
   const safeImageName = imageName.replace(/["\r\n]/g, "");
+  const native = nativeFindProcessTree();
+  if (native) {
+    try {
+      const pids = sanitizePids(native(safeImageName));
+      if (pids.length > 0) return pids;
+    } catch {
+      // Fall through to tasklist; native discovery is a fast path, not a requirement.
+    }
+  }
   try {
     const { stdout } = await execFileAsync(
       "tasklist.exe",
@@ -17,6 +32,23 @@ export async function findSpotifyPids(imageName = "Spotify.exe"): Promise<number
       throw error instanceof Error ? error : new Error(String(error));
     });
   }
+}
+
+function nativeFindProcessTree(): NativeDiscovery["findProcessTree"] | undefined {
+  try {
+    return (require("loopback-capture") as NativeDiscovery).findProcessTree;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizePids(values: number[]): number[] {
+  const pids: number[] = [];
+  for (const value of values) {
+    if (!Number.isInteger(value) || value <= 0) continue;
+    if (!pids.includes(value)) pids.push(value);
+  }
+  return pids;
 }
 
 export function parseTasklist(stdout: string, imageName: string): number[] {

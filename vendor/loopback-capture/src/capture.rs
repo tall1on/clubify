@@ -172,6 +172,19 @@ impl Session {
             + Send
             + 'static,
     ) -> Result<Arc<Self>, String> {
+        Self::start_worker_value(sink, backend).map(|(session, ())| session)
+    }
+
+    pub(crate) fn start_worker_value<T: Send + 'static>(
+        sink: AudioSink,
+        backend: impl FnOnce(
+                AudioSink,
+                Receiver<()>,
+                mpsc::SyncSender<Result<T, String>>,
+            ) -> Result<(), String>
+            + Send
+            + 'static,
+    ) -> Result<(Arc<Self>, T), String> {
         let mailbox = sink.mailbox.clone();
         let (stop, stopping) = mpsc::channel();
         let (ready, started) = mpsc::sync_channel(1);
@@ -203,7 +216,7 @@ impl Session {
             })),
         });
         match started.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(())) => Ok(session),
+            Ok(Ok(value)) => Ok((session, value)),
             result => {
                 let error = match result {
                     Ok(Err(message)) => message,

@@ -4,6 +4,12 @@ pub mod capture;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]
+#[cfg_attr(test, allow(dead_code))]
+mod process;
+#[cfg(target_os = "windows")]
+#[cfg_attr(test, allow(dead_code))]
+mod tap;
+#[cfg(target_os = "windows")]
 mod windows;
 
 // Keep the Node runtime out of pure Rust unit-test executables.

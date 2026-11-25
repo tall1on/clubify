@@ -23,6 +23,7 @@ const effects = computed(() => config.value.effects);
 const preset = computed(() => presets.value.find((candidate) => candidate.id === config.value.presetId));
 const accent = computed(() => preset.value?.accent ?? "#f43f8f");
 const active = computed(() => status.value.phase === "running");
+const silenced = computed(() => status.value.silencingMode !== "none");
 
 const formatPercent = (value: number) => `${Math.round(value * 100)}%`;
 const formatRatio = (value: number) => `${value.toFixed(1)}:1`;
@@ -111,26 +112,25 @@ onBeforeUnmount(() => engine.disconnect());
       </div>
     </section>
 
-    <section v-if="showGuide && !status.virtualCableDetected" class="guide card">
+    <section v-if="showGuide && !silenced" class="guide card">
       <div>
         <p class="eyebrow">ROUTING CHECK</p>
-        <h3>Send Spotify into a loopback cable</h3>
+        <h3>Spotify is not silenced</h3>
         <p>
-          Clubify captures Spotify's process audio. To keep the original from playing twice,
-          route Spotify to a virtual cable and Clubify will play the processed version on your
-          normal headphones.
+          Clubify normally attaches its audio tap to Spotify automatically and silences the
+          original. If that was blocked, allow Clubify in Windows Security or your antivirus,
+          restart Spotify, and reopen Clubify.
         </p>
         <ol>
-          <li>Install VB-CABLE (or use an existing virtual audio cable).</li>
+          <li>Allow the Clubify Spotify tap in Windows Security or your antivirus.</li>
+          <li>Restart Spotify, then reopen Clubify.</li>
           <li>
-            Windows 11: Settings → System → Sound → Volume mixer → Spotify → Output device →
+            Optional fallback: install VB-CABLE and set Spotify's output to
             <strong> CABLE Input</strong>.
           </li>
-          <li>Keep Clubify's output set to your headphones or speakers.</li>
         </ol>
         <p class="fine-print">
-          No cable detected yet. You can still test the DSP, but Spotify will be audible twice
-          until it is routed.
+          Until one of these works, Spotify will be audible twice while Clubify processes it.
         </p>
       </div>
       <button class="ghost-button" @click="showGuide = false">Dismiss</button>
@@ -301,12 +301,14 @@ onBeforeUnmount(() => engine.disconnect());
           <StatTile label="Overruns" :value="String(status.overruns)" />
           <StatTile label="Uptime" :value="formatUptime(status.uptimeSec)" />
         </div>
-        <div class="cable-status" :class="status.virtualCableDetected ? 'ok' : 'warn'">
+        <div class="cable-status" :class="silenced ? 'ok' : 'warn'">
           <span class="dot"></span>
           {{
-            status.virtualCableDetected
-              ? "Virtual cable detected"
-              : "No virtual audio cable detected"
+            status.silencingMode === "tap"
+              ? "Spotify silenced by Clubify"
+              : status.virtualCableDetected
+                ? "Virtual cable detected"
+                : "Spotify is not silenced"
           }}
         </div>
       </div>

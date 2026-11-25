@@ -527,6 +527,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "windows",
 ]
 
 [[package]]

@@ -30,6 +30,39 @@ fn registry(env: &mut Env) -> Result<Registry> {
 #[derive(Default)]
 struct Capture {
     session: Option<Arc<Session>>,
+    #[cfg(target_os = "windows")]
+    tap: Option<(u32, String)>,
+}
+
+fn audio_sink(
+    env: Env,
+    callback: napi::bindgen_prelude::FunctionRef<(Buffer,), JsUnknown>,
+) -> Result<AudioSink> {
+    let mailbox = Mailbox::new();
+    let delivery = mailbox.clone();
+    // The dispatcher and user callback exist only on the JS thread. Workers
+    // pass owned bytes through a mailbox, never JsValues or borrowed buffers.
+    let dispatcher = env.create_function_from_closure("deliverAudio", move |ctx| {
+        let packets = delivery.drain();
+        for packet in packets {
+            if !delivery.active() {
+                break;
+            }
+            // A callback may stop/restart capture. Never hold a lock or a
+            // mutable reference to Capture across this reentrant JS call.
+            callback
+                .borrow_back(ctx.env)?
+                .call((Buffer::from(packet),))?;
+        }
+        ctx.env.get_undefined()
+    })?;
+    // Audio is bounded in the mailbox, not in napi-rs' TSFN. Coalescing means
+    // at most one wakeup is queued, regardless of how far JS falls behind.
+    let tsfn: ThreadsafeFunction<(), ErrorStrategy::Fatal> =
+        dispatcher.create_threadsafe_function(0, |_ctx| Ok(Vec::<JsUnknown>::new()))?;
+    Ok(AudioSink::new(mailbox, move || {
+        tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking) == Status::Ok
+    }))
 }
 
 impl Capture {
@@ -46,31 +79,7 @@ impl Capture {
             ));
         }
         let registry = registry(&mut env)?;
-        let mailbox = Mailbox::new();
-        let delivery = mailbox.clone();
-        // The dispatcher and user callback exist only on the JS thread. Workers
-        // pass owned bytes through a mailbox, never JsValues or borrowed buffers.
-        let dispatcher = env.create_function_from_closure("deliverAudio", move |ctx| {
-            let packets = delivery.drain();
-            for packet in packets {
-                if !delivery.active() {
-                    break;
-                }
-                // A callback may stop/restart capture. Never hold a lock or a
-                // mutable reference to Capture across this reentrant JS call.
-                callback
-                    .borrow_back(ctx.env)?
-                    .call((Buffer::from(packet),))?;
-            }
-            ctx.env.get_undefined()
-        })?;
-        // Audio is bounded in the mailbox, not in napi-rs' TSFN. Coalescing means
-        // at most one wakeup is queued, regardless of how far JS falls behind.
-        let tsfn: ThreadsafeFunction<(), ErrorStrategy::Fatal> =
-            dispatcher.create_threadsafe_function(0, |_ctx| Ok(Vec::<JsUnknown>::new()))?;
-        let sink = AudioSink::new(mailbox, move || {
-            tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking) == Status::Ok
-        });
+        let sink = audio_sink(env, callback)?;
         let session = Session::start_with_options(mode, sink, options).map_err(Error::from_reason)?;
         let mut sessions = lock(&registry);
         sessions.retain(|session| session.strong_count() > 0);
@@ -79,11 +88,49 @@ impl Capture {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<()> {
-        if let Some(session) = self.session.take() {
-            session.stop().map_err(Error::from_reason)?;
+    #[cfg(target_os = "windows")]
+    fn start_tap(
+        &mut self,
+        mut env: Env,
+        pid: u32,
+        dll_path: String,
+        sample_rate: u32,
+        callback: napi::bindgen_prelude::FunctionRef<(Buffer,), JsUnknown>,
+    ) -> Result<crate::tap::TapFormat> {
+        if self.session.is_some() {
+            return Err(Error::from_reason(
+                "Capture already started on this instance",
+            ));
         }
-        Ok(())
+        let registry = registry(&mut env)?;
+        let sink = audio_sink(env, callback)?;
+        let tap_path = dll_path.clone();
+        let (session, format) = crate::tap::start_session(
+            pid,
+            std::path::Path::new(&dll_path),
+            sample_rate,
+            sink,
+        )
+        .map_err(Error::from_reason)?;
+        let mut sessions = lock(&registry);
+        sessions.retain(|session| session.strong_count() > 0);
+        sessions.push(Arc::downgrade(&session));
+        self.session = Some(session);
+        self.tap = Some((pid, tap_path));
+        Ok(format)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        let session_result = if let Some(session) = self.session.take() {
+            session.stop().map_err(Error::from_reason)
+        } else {
+            Ok(())
+        };
+        #[cfg(target_os = "windows")]
+        if let Some((pid, path)) = self.tap.take() {
+            let _ = crate::tap::stop(pid, std::path::Path::new(&path));
+        }
+        session_result
     }
 }
 
@@ -203,6 +250,53 @@ fn start_with_format(ctx: CallContext) -> Result<JsUndefined> {
     ctx.env.get_undefined()
 }
 
+#[cfg(target_os = "windows")]
+#[js_function(4)]
+fn start_tap(ctx: CallContext) -> Result<JsObject> {
+    if ctx.length != 4
+        || ctx.get::<JsUnknown>(1)?.get_type()? != ValueType::String
+        || ctx.get::<JsUnknown>(2)?.get_type()? != ValueType::Function
+        || ctx.get::<JsUnknown>(3)?.get_type()? != ValueType::Number
+    {
+        ctx.env.throw_type_error(
+            "Expected startTap(processId: number, dllPath: string, onData: (chunk: Buffer) => void, sampleRate: number)",
+            None,
+        )?;
+        return ctx.env.create_object();
+    }
+    let Some(pid) = process_id(ctx.env, ctx.get(0)?, "processId")? else {
+        return ctx.env.create_object();
+    };
+    let dll_path = ctx.get::<JsString>(1)?;
+    let dll_path = dll_path.into_utf8()?;
+    let dll_path = dll_path.as_str()?.to_owned();
+    let callback = ctx.get::<Function<(Buffer,), JsUnknown>>(2)?.create_ref()?;
+    let sample_rate = ctx.get::<JsNumber>(3)?.get_double()?;
+    if !sample_rate.is_finite()
+        || !(8_000.0..=192_000.0).contains(&sample_rate)
+        || sample_rate.fract() != 0.0
+    {
+        ctx.env.throw_range_error(
+            "sampleRate must be an integer between 8000 and 192000",
+            None,
+        )?;
+        return ctx.env.create_object();
+    }
+    let this: JsObject = ctx.this()?;
+    let format = ctx.env.unwrap::<Capture>(&this)?.start_tap(
+        *ctx.env,
+        pid,
+        dll_path,
+        sample_rate as u32,
+        callback,
+    )?;
+    let result = ctx.env.create_object()?;
+    let mut result = result;
+    result.set_named_property("sampleRate", ctx.env.create_uint32(format.sample_rate)?)?;
+    result.set_named_property("channels", ctx.env.create_uint32(format.channels as u32)?)?;
+    Ok(result)
+}
+
 #[js_function(3)]
 fn start_system_audio(ctx: CallContext) -> Result<JsUndefined> {
     if ctx.length < 1
@@ -255,18 +349,32 @@ fn last_error(ctx: CallContext) -> Result<Option<String>> {
 
 #[module_exports]
 fn init(mut exports: JsObject, env: Env) -> Result<()> {
-    let constructor: JsFunction = env.define_class(
-        "LoopbackCapture",
-        constructor,
-        &[
-            Property::new("start")?.with_method(start),
-            Property::new("startWithFormat")?.with_method(start_with_format),
-            Property::new("startSystemAudio")?.with_method(start_system_audio),
-            Property::new("stop")?.with_method(stop),
-            Property::new("lastError")?.with_getter(last_error),
-        ],
-    )?;
+    let mut properties = vec![
+        Property::new("start")?.with_method(start),
+        Property::new("startWithFormat")?.with_method(start_with_format),
+        Property::new("startSystemAudio")?.with_method(start_system_audio),
+        Property::new("stop")?.with_method(stop),
+        Property::new("lastError")?.with_getter(last_error),
+    ];
+    #[cfg(target_os = "windows")]
+    properties.push(Property::new("startTap")?.with_method(start_tap));
+    let constructor: JsFunction = env.define_class("LoopbackCapture", constructor, &properties)?;
     exports.set_named_property("LoopbackCapture", constructor)?;
     exports.set_named_property("supportsFloat32", true)?;
+    #[cfg(target_os = "windows")]
+    {
+        exports.set_named_property("supportsTap", true)?;
+        let find_process_tree = env.create_function_from_closure("findProcessTree", |ctx| {
+            let image_name = ctx.get::<JsString>(0)?.into_utf8()?;
+            let pids = crate::process::find_process_tree(image_name.as_str()?)
+                .map_err(Error::from_reason)?;
+            let mut array = ctx.env.create_array_with_length(pids.len())?;
+            for (index, pid) in pids.iter().enumerate() {
+                array.set_element(index as u32, ctx.env.create_uint32(*pid)?)?;
+            }
+            Ok(array)
+        })?;
+        exports.set_named_property("findProcessTree", find_process_tree)?;
+    }
     Ok(())
 }

@@ -2,8 +2,10 @@
 
 use std::{
     env,
+    ffi::c_void,
     fs::OpenOptions,
     io::{Read, Write},
+    mem::size_of,
     net::{SocketAddr, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -12,7 +14,18 @@ use std::{
 };
 
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    },
+};
 
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -27,8 +40,55 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const UPDATE_LOG_LIMIT_BYTES: u64 = 256 * 1024;
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
 
-struct EngineState(Mutex<Option<Child>>);
+struct EngineState(Mutex<Option<EngineProcess>>);
 struct Quitting(Mutex<bool>);
+
+struct EngineProcess {
+    child: Child,
+    #[cfg(windows)]
+    job: Option<JobHandle>,
+}
+
+#[cfg(windows)]
+struct JobHandle(isize);
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(HANDLE(self.0 as *mut c_void)) };
+    }
+}
+
+#[cfg(windows)]
+fn create_engine_job(child: &Child) -> Option<JobHandle> {
+    unsafe {
+        let job = match CreateJobObjectW(None, None) {
+            Ok(job) => job,
+            Err(error) => {
+                eprintln!("[clubify] could not create engine job: {error}");
+                return None;
+            }
+        };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Err(error) = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const c_void,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) {
+            eprintln!("[clubify] could not configure engine job: {error}");
+            let _ = CloseHandle(job);
+            return None;
+        }
+        if let Err(error) = AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())) {
+            eprintln!("[clubify] could not assign engine to job: {error}");
+            let _ = CloseHandle(job);
+            return None;
+        }
+        Some(JobHandle(job.0 as isize))
+    }
+}
 
 fn main() {
     tauri::Builder::default()
@@ -353,8 +413,15 @@ fn spawn_engine(app: &tauri::AppHandle) {
 
     match command.spawn() {
         Ok(child) => {
+            #[cfg(windows)]
+            let process = EngineProcess {
+                job: create_engine_job(&child),
+                child,
+            };
+            #[cfg(not(windows))]
+            let process = EngineProcess { child };
             if let Ok(mut state) = app.state::<EngineState>().0.lock() {
-                *state = Some(child);
+                *state = Some(process);
             }
         }
         Err(error) => eprintln!("[clubify] could not start audio engine: {error}"),
@@ -363,9 +430,14 @@ fn spawn_engine(app: &tauri::AppHandle) {
 
 fn stop_engine(app: &tauri::AppHandle) {
     if let Ok(mut state) = app.state::<EngineState>().0.lock() {
-        if let Some(mut child) = state.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(mut process) = state.take() {
+            let _ = process.child.kill();
+            let _ = process.child.wait();
+            // Keep the job handle alive until after the child is reaped. The
+            // handle's Drop closes it; KILL_ON_JOB_CLOSE then also covers a
+            // crash of the Tauri process itself.
+            #[cfg(windows)]
+            let _job = process.job.as_ref();
         }
     }
 }

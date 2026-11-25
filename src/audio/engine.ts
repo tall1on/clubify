@@ -70,6 +70,8 @@ export class AudioEngine extends EventEmitter {
   private captureError: string | null = null;
   private outputError: string | null = null;
   private warning: string | null = null;
+  private tapWarning: string | null = null;
+  private silencingMode: "tap" | "cable" | "none" = "none";
   private hasProcessedAudio = false;
   private stopping = false;
   private underruns = 0;
@@ -227,6 +229,8 @@ export class AudioEngine extends EventEmitter {
     this.captureError = null;
     this.outputError = null;
     this.warning = null;
+    this.tapWarning = null;
+    this.silencingMode = "none";
     this.spotifyPids = [];
     this.capture.stop();
     this.queue.clear();
@@ -330,10 +334,10 @@ export class AudioEngine extends EventEmitter {
       return 1;
     }
     this.driftSettled = false;
-    this.driftIntegral += error * 0.00005;
-    this.driftIntegral = Math.min(0.001, Math.max(-0.001, this.driftIntegral));
-    const correction = error * 0.002 + this.driftIntegral;
-    return Math.min(1.001, Math.max(0.999, 1 + correction));
+    this.driftIntegral += error * 0.0002;
+    this.driftIntegral = Math.min(0.01, Math.max(-0.01, this.driftIntegral));
+    const correction = error * 0.004 + this.driftIntegral;
+    return Math.min(1.01, Math.max(0.99, 1 + correction));
   }
 
   private silence(frames: number): Buffer {
@@ -398,7 +402,27 @@ export class AudioEngine extends EventEmitter {
     this.driftIntegral = 0;
     this.smoothedFillFrames = 0;
     this.driftSettled = true;
+    this.tapWarning = null;
+    this.silencingMode = "none";
     try {
+      if (this.capture.supportsTap) {
+        try {
+          const started = this.capture.startTap(
+            pid,
+            (pcm) => {
+              this.onCaptureChunk(pcm);
+            },
+            { format: "f32", sampleRate: this.sampleRate },
+          );
+          this.captureSampleRate = started.sampleRate;
+          this.captureError = null;
+          this.silencingMode = "tap";
+          this.emitStatus();
+          return;
+        } catch (tapError) {
+          this.tapWarning = `Spotify tap unavailable (${errorMessage(tapError)}); using process loopback`;
+        }
+      }
       const started = this.capture.start(
         pid,
         (pcm) => {
@@ -412,10 +436,13 @@ export class AudioEngine extends EventEmitter {
         this.assembler.setFormat(started.format);
         this.warning = "Float capture was rejected; falling back to 16-bit";
       }
+      this.silencingMode = this.virtualCableDetected() ? "cable" : "none";
       this.captureError = null;
+      this.emitStatus();
     } catch (error) {
       this.captureError = errorMessage(error);
       this.capture.stop();
+      this.silencingMode = "none";
       this.emitStatus();
     }
   }
@@ -427,6 +454,7 @@ export class AudioEngine extends EventEmitter {
     this.capture.stop();
     this.lastCaptureAt = Date.now();
     this.outputPrimed = false;
+    this.silencingMode = "none";
     this.emitStatus();
   }
 
@@ -545,6 +573,7 @@ export class AudioEngine extends EventEmitter {
         : "Open Spotify and start playback";
     const message =
       lastError ??
+      this.tapWarning ??
       this.warning ??
       (phase === "running"
         ? "Processing Spotify"
@@ -575,6 +604,7 @@ export class AudioEngine extends EventEmitter {
       lastError,
       autoGainDb: Math.round(20 * Math.log10(this.autoGain) * 10) / 10,
       virtualCableDetected: this.virtualCableDetected(),
+      silencingMode: this.silencingMode,
       uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
     };
   }

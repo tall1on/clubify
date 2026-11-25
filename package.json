@@ -21,9 +21,10 @@
         "ui:build": "npm run licenses:check && vite build --config ui/vite.config.ts",
         "dev:all": "concurrently -k -n engine,ui \"npm:engine\" \"npm:ui:dev\"",
         "desktop:dev": "tauri dev",
-        "package:engine": "npm run build && node scripts/package-engine.mjs",
+        "package:engine": "npm run build && npm run build:tap && node scripts/package-engine.mjs",
         "desktop:build": "npm run package:engine && tauri build",
-        "build:capture": "node vendor/loopback-capture/scripts/build-native.mjs",
+        "build:capture": "node vendor/loopback-capture/scripts/build-native.mjs && npm run build:tap",
+        "build:tap": "node scripts/build-tap.mjs",
         "ui:typecheck": "vue-tsc -p ui/tsconfig.json --noEmit",
         "version:bump": "node scripts/bump-version.mjs"
     },

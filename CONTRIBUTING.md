@@ -4,11 +4,11 @@ Technical documentation for building and contributing to Clubify. For a user-fac
 
 ## Requirements
 
-- Windows 11 build 20348 or newer (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`).
+- Windows 11 build 20348 or newer.
 - Node.js 22.12 or newer.
-- A virtual audio cable such as VB-CABLE, or any unused output endpoint you can route Spotify to.
+- No virtual audio cable is required for the normal Spotify tap path. VB-CABLE (or another silent endpoint) is an optional fallback when security software blocks process injection.
 - For desktop builds only: Rust, Cargo, and the Visual C++ build tools plus Windows SDK.
-- Rebuilding the bundled capture fork requires Rust 1.88+ and the Windows SDK. A prebuilt Windows x64 addon is committed, so normal installs do not need Rust.
+- Rebuilding the bundled native code requires Rust 1.88+ and the Windows SDK. Prebuilt Windows x64 addon and tap DLL are committed, so normal installs do not need Rust.
 
 ## Quick start: browser mode
 
@@ -20,7 +20,7 @@ npm run engine
 
 Open http://127.0.0.1:8787. The engine serves the built UI and exposes a localhost-only WebSocket control channel.
 
-`npm install` uses the vendored capture fork in `vendor/loopback-capture`. A prebuilt `win32-x64` addon is included. If it is missing or you changed the Rust source, rebuild it with:
+`npm install` uses the vendored capture fork in `vendor/loopback-capture` and the tap DLL source in `vendor/spotify-tap`. Prebuilt Windows x64 binaries are included. If they are missing or you changed the Rust source, rebuild both with:
 
 ```powershell
 npm run build:capture
@@ -89,30 +89,31 @@ The self-hosted runner needs the `self-hosted`, `Windows`, and `X64` labels, Nod
 ```text
 Spotify.exe (FLAC 24-bit / 44.1 kHz, decoded by Spotify)
    |
-   |  Windows audio engine, float32 at the cable endpoint rate
+   |  preferred: in-process tap DLL hooks IAudioRenderClient
+   |  (GetBuffer/ReleaseBuffer), copies f32 frames, zeroes the original
    v
-Windows Process Loopback (include process tree)
+vendor/spotify-tap (shared-memory ring, heartbeat fail-open)
    |
+   |  vendor/loopback-capture reader measures the real render rate
+   |  (often 44.1 kHz) and resamples it to the engine rate
    v
-vendor/loopback-capture (Rust N-API fork)
-   |
-   |  float32 stereo at the engine rate
-   |  AUTOCONVERTPCM + SRC_DEFAULT_QUALITY
-   |  silent packets delivered as zeros
-   v
-Block assembler -> float32 DSP chain -> sinc drift queue (unity deadband)
-                                                    |
-                                                    v
-                                    audify / WASAPI float32 render
-                                                    |
-                                                    v
-                                         headphones or speakers
+Block assembler -> float32 DSP chain -> sinc drift queue (adaptive clock correction)
+                                                     |
+                                                     v
+                                     audify / WASAPI float32 render
+                                                     |
+                                                     v
+                                          headphones or speakers
 
 Tauri app --tray/autostart--> spawns Node engine
 Browser or WebView UI <--WebSocket--> engine control server
+
+Fallback when injection is blocked:
+Spotify.exe -> Windows Process Loopback (include process tree)
+   -> vendor/loopback-capture -> same DSP/output path
 ```
 
-The engine follows the selected output device's preferred sample rate. Capture requests that same rate and format, so with the cable and output device both set to the same rate the path does no sample-rate conversion at all. The drift queue only corrects clock mismatch between the two devices, using a 32-tap windowed-sinc interpolator and staying on exactly 1.0 while the buffer is within its deadband.
+The tap path removes the need for a virtual cable and suppresses the original locally. The engine follows the selected output device's preferred sample rate; the tap reader converts Spotify's render rate (typically 44.1 kHz) to that rate with a 16-tap windowed-sinc resampler. The drift queue corrects the remaining clock mismatch. The fallback path still requests the engine rate from WASAPI with `AUTOCONVERTPCM` and works best when the cable and output devices share a rate.
 
 Project layout:
 
@@ -126,8 +127,11 @@ ui/             Vue 3 + Pinia + Vite control UI
 src-tauri/      Tauri 2 shell, tray menu, autostart, engine lifecycle
 scripts/        production engine packaging and license generation
 licenses/       curated license-text overrides for packages that ship without a license file
-vendor/         vendored loopback-capture fork (Rust) and its prebuilt addon
+vendor/         vendored loopback-capture fork (Rust addon, tap reader/injector)
+vendor/spotify-tap/  synced copy of the external MIT spotify-tap project (injected render tap)
 ```
+
+The canonical tap source is maintained in the separate `spotify-tap` repository. See [AGENTS.md](AGENTS.md) for the edit/sync workflow; do not add a symlink or a second implementation. `npm run build:tap` builds the vendored copy and copies the result to `vendor/loopback-capture/build/Release/clubify_spotify_tap.dll`.
 
 ## Configuration
 
@@ -143,7 +147,7 @@ Useful environment overrides for development and portable builds:
 - `CLUBIFY_UPDATE_CHECK=1` — run the updater from a debug build.
 - `CLUBIFY_UPDATE_INTERVAL_SECS` — seconds between update checks (default `21600`, six hours). Lower it while testing the updater.
 
-Capture is keyed on the image name `Spotify.exe`. If a Spotify distribution uses a different process name, change `spotifyImageName` in the config.
+Capture is keyed on the image name `Spotify.exe`. If a Spotify distribution uses a different process name, change `spotifyImageName` in the config. The native discovery helper picks the real main process (the tree root), not the lowest PID. The tap is injected into that process; if it is blocked, capture falls back to process loopback and `silencingMode` becomes `"cable"` or `"none"`.
 
 Ports are fixed at `8787` for the control server and WebSocket. The server binds to `127.0.0.1` only.
 
@@ -169,11 +173,14 @@ npm run ui:build
 npm run licenses:generate
 npm run licenses:check
 npm run build:capture
+npm run build:tap
+cargo test --manifest-path vendor/loopback-capture/Cargo.toml
 cargo check --manifest-path vendor/loopback-capture/Cargo.toml
+cargo check --manifest-path vendor/spotify-tap/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-`npm run build:capture` rebuilds the vendored native addon and updates `vendor/loopback-capture/build/Release/loopback_capture_addon.node`. The audio smoke test can also be exercised without Spotify by creating a process named `Spotify.exe` that renders a tone, but it will be audible. End-to-end testing with a synthetic process produced a stable 35–40 ms queue with zero underruns on the development machine.
+`npm run build:capture` rebuilds both natives: the Node addon at `vendor/loopback-capture/build/Release/loopback_capture_addon.node` and the injected tap at `vendor/loopback-capture/build/Release/clubify_spotify_tap.dll`. `npm run build:tap` builds only the tap. The engine copies the tap DLL to a content-addressed path under `%LOCALAPPDATA%\Clubify\tap\<hash>` before injection, so a Spotify process never locks the packaged copy and old versions can be replaced. The audio smoke test can also be exercised without Spotify by creating a process named `Spotify.exe` that renders a tone, but it will be audible. End-to-end testing with a synthetic process produced a stable 35–40 ms queue with zero underruns on the development machine; the tap path was verified with Spotify rendering 44.1 kHz into a 48 kHz engine with zero underruns and correct resampling.
 
 `typescript` is aliased to `typescript-native-bridge` (pinned exactly, with a matching npm `typescript` override), so `tsc`, `vue-tsc`, and editors all use the classic TypeScript API on top of the native tsgo 7 checker. The first type-check in a process prints `TNB ACTIVE` to stderr. Update the alias and override together.
 
@@ -183,7 +190,7 @@ The in-app license page is generated, not hand-maintained. `npm run licenses:gen
 
 - `LICENSE` and `package.json` for the project license.
 - The installed npm production dependency tree from `package-lock.json` and `node_modules`.
-- `cargo tree` and `cargo metadata` for `src-tauri/Cargo.toml` and `vendor/loopback-capture/Cargo.toml`, resolved for the Windows target.
+- `cargo tree` and `cargo metadata` for `src-tauri/Cargo.toml`, `vendor/loopback-capture/Cargo.toml`, and `vendor/spotify-tap/Cargo.toml`, resolved for the Windows target.
 - Optional `licenses/overrides/<npm|cargo>/<package>.txt` files when a package distributes a license identifier but no license text.
 
 The generator runs automatically before `ui:dev`, `ui:build`, and `desktop:build`. After adding or upgrading a dependency, run it directly and commit the refreshed `ui/public/licenses.json`. The script stays successful without Cargo by keeping previously generated Rust entries, and it is never necessary to edit `licenses.json` by hand. `ui:build` uses `licenses:check`, which fails the build if any package has no license text and no override, so new dependencies cannot silently ship without a notice.
@@ -193,8 +200,14 @@ The generator runs automatically before `ui:dev`, `ui:build`, and `desktop:build
 **The engine reports "bundled loopback-capture fork is required"**
 The patched addon is missing. Run `npm run build:capture`, then `npm install` again if `node_modules` still points at the upstream package.
 
+**The tap is not silencing Spotify / `silencingMode` is not `tap`**
+The tap DLL is missing or injection failed. Run `npm run build:capture`, check `%TEMP%\spotify-tap.log`, and allow the DLL in Windows Security or your antivirus. Restart Spotify after a Clubify update so the old injected version unloads. The fallback stays on process loopback; route Spotify to a silent endpoint if you need it.
+
+**The tap rate is wrong / dropouts after a Spotify update**
+The reader measures Spotify's real render rate and resamples to the engine rate. If Spotify changes its audio buffer format, check the tap log line with `mix format` and the engine status `captureSampleRate`. The addon logs the measured rate to help diagnose. If needed, restart Spotify to reinject a rebuilt DLL.
+
 **The UI shows different capture and engine rates**
-The engine follows the output device, and capture requests the same rate. If the capture rate differs, the cable endpoint rejected the requested format; set the cable and output device to the same rate in Windows Sound settings and restart Clubify.
+With the tap, `captureSampleRate` is the engine rate after resampling; the raw Spotify rate is measured internally. Without a tap, the engine requests its rate from WASAPI and the cable endpoint may reject it; set the cable and output device to the same rate and restart Clubify.
 
 **Desktop window is not visible**
 The app starts in the tray. Left-click the tray icon. Use `$env:CLUBIFY_SHOW=1` for development launches.
@@ -208,9 +221,10 @@ Check `%LOCALAPPDATA%\com.clubify.audio\logs\updater.log`. A 404 there means the
 ## Technical limitations
 
 - Windows x64 only for the supported capture path.
-- Original audio suppression depends on routing Spotify to a virtual/silent endpoint.
-- Output is float32 stereo at the output device's preferred rate. Devices that cannot open that rate in shared mode fall back to 48 kHz and are resampled by Windows.
-- Capture uses the vendored `loopback-capture` fork in `vendor/loopback-capture`. It is pinned; upstream changes need to be merged manually. Rebuild it with `npm run build:capture` after changing the Rust source.
-- Total latency is typically above the 30 ms target because of shared-mode WASAPI, the virtual cable, the jitter queue, and the limiter lookahead. Lower the safety buffer to trade stability for latency.
+- The preferred path injects a small unsigned DLL into Spotify. Antivirus/EDR may block it and Spotify updates may break the hook. The DLL remains loaded until Spotify restarts, so a Clubify update may need a Spotify restart. The process-loopback fallback with a virtual/silent endpoint remains.
+- Output is float32 stereo at the output device's preferred rate. The tap reader resamples Spotify's render rate (often 44.1 kHz) to that rate with a windowed-sinc resampler; the fallback uses WASAPI `AUTOCONVERTPCM`.
+- The tap captures before Windows per-app and device volume, so the Windows mixer app slider does not change the captured level. Spotify's own volume and the output device volume still work.
+- Capture uses the vendored `loopback-capture` fork in `vendor/loopback-capture` and the injected DLL in `vendor/spotify-tap`. Both are pinned; upstream changes need to be merged manually. Rebuild them with `npm run build:capture` after changing the Rust source.
+- Total latency is typically above the 30 ms target because of shared-mode WASAPI, the tap/resampler or virtual cable, the jitter queue, and the limiter lookahead. Lower the safety buffer to trade stability for latency.
 - The control server has no authentication because it binds to localhost. Do not expose port 8787.
 - The production package bundles Node and therefore is substantially larger than a pure Rust Tauri app.

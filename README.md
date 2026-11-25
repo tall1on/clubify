@@ -1,43 +1,139 @@
-# Clubify
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="128" alt="Clubify logo">
+</p>
 
-Spotify-only nightclub processing for Windows. Clubify captures only the Spotify process tree with the Windows Process Loopback API, runs the audio through a bass/saturation/reverb/compression chain, and renders the result to your normal output device. Other applications are untouched.
+<h1 align="center">Clubify</h1>
 
-![stack](https://img.shields.io/badge/Windows-11%20build%2020348%2B-0078D4) ![node](https://img.shields.io/badge/Node.js-20%2B-339933) ![tauri](https://img.shields.io/badge/Tauri-2-24C8DB)
+<p align="center">
+  <strong>Make Spotify sound like it's playing in a nightclub.</strong><br>
+  Clubify adds deep bass, warmth, and room echo to Spotify only. Games, Discord, and YouTube stay untouched.
+</p>
 
-## What it does
+<p align="center">
+  <a href="https://github.com/tall1on/clubify/releases/latest"><img src="https://img.shields.io/github/v/release/tall1on/clubify?label=download" alt="Download latest release"></a>
+  <img src="https://img.shields.io/badge/Windows-11%20build%2020348%2B-0078D4" alt="Windows 11 build 20348 or newer">
+</p>
 
-- Captures `Spotify.exe` and its descendants through WASAPI process loopback.
-- 32-bit float stereo capture at the output device's sample rate, fixed-size DSP blocks, float32 WASAPI output, and a drift-corrected sinc jitter queue.
-- PA-style tone shaping (sub peak, low-mid scoop, presence horn, air damping), low-band ADAA saturation, early reflections, an FDN room reverb with predelay and ducking, stereo width, distance macro, RMS compressor, lookahead limiter, and auto level.
-- Six room presets plus live fine tuning and click-free bypass.
-- 24-bit / 44.1 kHz Spotify Lossless is carried through as float32 without a bit-depth cut and without a clubify-side sample-rate conversion when the cable and output device share a rate.
-- Automatic Spotify process discovery and capture restart.
-- Tauri tray app, close-to-tray, and Windows autostart in release builds.
-- Browser control UI is also available for development.
+<!-- TODO: add a screenshot or short GIF of the Clubify window here -->
 
-## Requirements
+## Download
 
-- Windows 11 build 20348 or newer (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`).
-- Node.js 20 or newer.
-- A virtual audio cable such as VB-CABLE, or any unused output endpoint you can route Spotify to.
-- For desktop builds only: Rust, Cargo, and the Visual C++ build tools plus Windows SDK.
-- Rebuilding the bundled capture fork requires Rust 1.88+ and the Windows SDK. A prebuilt Windows x64 addon is committed, so normal installs do not need Rust.
+**[Download the latest version](https://github.com/tall1on/clubify/releases/latest)** and run the `Clubify_x.y.z_x64-setup.exe` installer.
 
-## Why a virtual cable is required
+- **Windows 11 only** (build 20348 or newer).
+- **Updates itself.** On launch, Clubify checks for a new version and installs it automatically.
+- **Starts with Windows.** It runs quietly in the system tray, near the clock. You can turn this off from the tray menu.
+- **No account needed.** Clubify never asks for your Spotify login.
 
-Process loopback capture respects the captured session's mute and volume state. In testing, muting the session or setting its volume to zero also silences the process-loopback capture. There is no supported API that both captures a process and suppresses its original endpoint output.
+## Setup (one time, about 3 minutes)
 
-The reliable routing is:
+Clubify needs Spotify's sound to go into a "silent" virtual speaker. Otherwise you would hear the original track and the club version at the same time.
 
-1. Route Spotify to a silent virtual cable (`CABLE Input`).
-2. Let Clubify capture the Spotify process tree.
-3. Render the processed audio to your headphones or speakers.
+1. **Install [VB-CABLE](https://vb-audio.com/Cable/)** (free) and restart your PC.
+2. **Send Spotify to the cable.** Open Windows **Settings → System → Sound → Volume mixer**, find Spotify under Apps, and set its **Output device** to **CABLE Input**. Spotify has to be playing for it to appear in the list.
+3. **Open Clubify** from the tray (bottom-right of the taskbar, near the clock), choose your headphones or speakers as the output device, and press play in Spotify.
 
-On Windows 11 this is configured under **Settings -> System -> Sound -> Volume mixer -> Spotify -> Output device -> CABLE Input**. Other apps stay on the normal output device.
+Other apps stay on your normal speakers. To stop using the cable later, set Spotify's output device back to your default device.
 
-If you play Spotify through your normal device without routing, Clubify still processes the captured audio, but you will hear the original and processed signal at the same time.
+### Using it
 
-## Quick start: browser mode
+Pick a preset and adjust **bass**, **saturation**, and **room** to taste. **Bypass** instantly turns the effects off so you can compare. Settings are saved automatically.
+
+## Presets
+
+| Preset | Sound |
+| --- | --- |
+| **Afterhours** | Hollow concrete room, horn-loaded PA, distant sub. The default. |
+| **Nightclub** | Warm low end, moderate drive, smooth velvet room. |
+| **Deep House** | Deeper bass, long tail, gentle compression. |
+| **Festival** | Loud, forward, heavily glued together. |
+| **Warehouse** | Dirty saturation and a large concrete tail. |
+| **Clean** | Your untouched Spotify signal with effects off. |
+
+<details>
+<summary><strong>Fine tuning</strong></summary>
+
+Main controls: bass, saturation, room level, room distance, compression, output gain, preset selection, and bypass.
+
+Additional controls: input trim, bass corner, low-mid scoop and frequency, PA presence and frequency, air damping, stereo width, early reflections, reverb size, damping, predelay and ducking, compressor threshold and ratio, safety buffer, auto level, and output device.
+
+Auto level slowly normalizes quiet captures toward a music-ready level. It is on by default and can be disabled in the routing panel.
+
+The safety buffer defaults to 48 ms. Raise it if the machine underruns, or lower it for lower latency. The reported buffer is the jitter queue; total latency also includes capture, DSP, and output.
+
+</details>
+
+## FAQ
+
+**Does Clubify need my Spotify account?** No. It only listens to the Spotify app's audio on your PC and never talks to Spotify's servers.
+
+**Does it affect other apps?** No. Only the Spotify process and its children are captured and processed.
+
+**How do I turn the effects off?** Press **Bypass** in the UI.
+
+**How do I stop it starting with Windows?** Right-click the tray icon and uncheck **Start with Windows**. The choice is remembered across updates.
+
+**How do I update it?** You don't have to. Clubify updates itself automatically when it launches.
+
+**How do I uninstall it?** Open Windows **Settings → Apps → Installed apps**, find Clubify, and uninstall. Then set Spotify's output device back to your normal speakers.
+
+**Windows showed a security warning.** If SmartScreen appears, choose **More info → Run anyway**.
+
+**Is it bit-perfect / lossless?** Close. See [Best quality with Spotify Lossless](#best-quality-with-spotify-lossless) below.
+
+## Troubleshooting
+
+**Stuck on "Waiting for Spotify"**
+Spotify is open but nothing is playing, or the process name is different. Press play, then check the PID shown in the UI. Clubify captures the lowest `Spotify.exe` process and its children.
+
+**I hear Spotify twice**
+Spotify is still routed to your normal output device. Route it to the virtual cable and keep Clubify's output on your headphones.
+
+**No virtual cable detected**
+Install VB-CABLE, reboot, then restart Clubify. The warning is informational and can be dismissed if you route Spotify to a different silent endpoint.
+
+**Audio is too quiet or too loud**
+Auto level adapts slowly by design. Use input trim for manual gain and output gain for the final level, or disable auto level.
+
+**Clicks, dropouts, or stuttering**
+Raise the safety buffer, close CPU-heavy applications, or choose a different output device.
+
+**I can't find the Clubify window**
+The app starts in the tray. Left-click the tray icon, near the clock.
+
+**Spotify sounds gritty, dull, or distorted**
+Set Spotify's volume to 100% and control loudness in Clubify, set Spotify normalization to *Normal* or off, and disable Spotify's equalizer. For the cleanest path, follow [Best quality with Spotify Lossless](#best-quality-with-spotify-lossless).
+
+## Best quality with Spotify Lossless
+
+<details>
+<summary>Click to expand the audiophile setup</summary>
+
+For the cleanest Spotify Lossless path:
+
+1. Set Spotify to **Lossless**, volume **100%**, normalization **Normal** or off, and disable its equalizer.
+2. Open Windows **Settings → System → Sound**.
+3. Set **CABLE Input** (the Spotify output) to the same rate as your headphones, for example **24-bit, 44100 Hz**.
+4. Set the headphones/speakers device to the same rate, for example **24-bit, 44100 Hz**.
+5. Disable audio enhancements on both devices.
+6. Start Clubify; the UI shows the engine rate and the capture feed (`f32`).
+7. For a bit-transparent check, select **Clean** or bypass; auto level is not applied while effects are off.
+
+When both devices are 44.1 kHz, Spotify's 24-bit / 44.1 kHz stream stays at 44.1 kHz through Windows and the capture path, into the float32 DSP. No Clubify-side resample is inserted.
+
+</details>
+
+## Known limitations
+
+- Windows x64 only for the supported capture path.
+- A virtual or silent output endpoint is required to suppress the original audio.
+- Spotify is detected by process name, not the Spotify Web API. No login or account access is involved.
+- There is a small delay (tens of milliseconds) between Spotify and what you hear, so Clubify is not suited for watching video.
+- Spotify's normalized loudness is applied before capture. Clubify cannot recover peaks removed by Spotify's *Loud* limiter, so use *Normal* or off for lossless listening.
+
+## Development
+
+Building Clubify, the architecture, configuration, API, release process, and developer troubleshooting live in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ```powershell
 npm install
@@ -45,242 +141,7 @@ npm run ui:build
 npm run engine
 ```
 
-Open http://127.0.0.1:8787. The engine serves the built UI and exposes a localhost-only WebSocket control channel.
-
-`npm install` uses the vendored capture fork in `vendor/loopback-capture`. A prebuilt `win32-x64` addon is included. If it is missing or you changed the Rust source, rebuild it with:
-
-```powershell
-npm run build:capture
-```
-
-For frontend development with hot reload:
-
-```powershell
-npm run dev:all
-```
-
-This starts the engine on port 8787 and Vite on http://localhost:5173. The UI connects to the engine on 8787.
-
-## Quick start: desktop mode
-
-```powershell
-npm run desktop:dev
-```
-
-The Tauri window starts hidden in the tray. Left-click the tray icon to open it. To show the window immediately during development:
-
-```powershell
-$env:CLUBIFY_SHOW=1
-npm run desktop:dev
-```
-
-### Production installer
-
-```powershell
-npm run desktop:build
-```
-
-This does three things:
-
-1. Compiles the engine to `dist/`.
-2. Creates `src-tauri/resources/` with a portable Node runtime, the compiled engine, and the required native modules.
-3. Runs `tauri build`, producing an installer under `src-tauri/target/release/bundle/`.
-
-The packaged app starts the bundled engine automatically and does not require a system Node installation. The trade-off is a larger installer because the Node runtime is bundled.
-
-The release build enables autostart on first launch and records that decision, so disabling autostart from the tray menu sticks across updates. The tray menu has a **Start with Windows** checkbox. Debug builds do not touch autostart.
-
-### Releases and auto-updates
-
-Release builds update themselves from GitHub Releases. On start, they fetch `https://github.com/tall1on/clubify/releases/latest/download/latest.json`, download the signed NSIS installer when a newer version is published, stop the bundled engine, install, and relaunch.
-
-The release workflow (`.github/workflows/release.yml`) runs on a self-hosted Windows x64 runner when the version changes on `main`. It builds the engine, produces NSIS and signed updater artifacts, and publishes the GitHub release (installer, `.sig`, and `latest.json`). The workflow can also be started manually with `workflow_dispatch`.
-
-Bump every manifest at once, then push:
-
-```powershell
-npm run version:bump -- 0.2.0
-git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "release 0.2.0"
-git push origin main
-```
-
-The updater keypair was generated with `npx tauri signer generate -w "$env:USERPROFILE\.tauri\clubify.key"`. The public key is embedded in `src-tauri/tauri.conf.json`. Add the private key file contents as the `TAURI_SIGNING_PRIVATE_KEY` repository secret, plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has a password. Keep the private key safe: installed copies cannot verify updates signed with a different key. Builds made before the updater was added have to be replaced manually once.
-
-The self-hosted runner needs the `self-hosted`, `Windows`, and `X64` labels, Node.js 20, Rust, and the Visual Studio C++ build tools with the Windows SDK. GitHub Releases must be publicly readable because the updater does not ship a GitHub token. `npm run desktop:build` still produces unsigned local bundles; signed updater artifacts are created only by the release workflow. Set `CLUBIFY_UPDATE_CHECK=1` to exercise the updater from a debug build.
-
-## Controls
-
-Presets:
-
-- **Afterhours** — hollow concrete room, horn-loaded PA, distant sub (default).
-- **Nightclub** — warm low end, moderate drive, velvet room.
-- **Deep House** — deeper bass, long tail, gentle compression.
-- **Festival** — loud, forward, heavily glued.
-- **Warehouse** — dirty saturation and a large concrete tail.
-- **Clean** — captured signal with effects bypassed.
-
-Main controls: bass, saturation, room level, room distance, compression, output gain, preset selection, bypass.
-
-Fine tuning: input trim, bass corner, low-mid scoop and frequency, PA presence and frequency, air damping, stereo width, early reflections, reverb size, damping, predelay and ducking, compressor threshold and ratio, safety buffer, auto level, output device.
-
-Auto level slowly normalizes quiet captures toward a music-ready level. It is on by default and can be disabled in the routing panel.
-
-The safety buffer defaults to 48 ms. It can be raised if the machine underruns and lowered for lower latency. The reported buffer is the jitter queue; total latency also includes capture, DSP, and WASAPI output.
-
-## Lossless setup
-
-For the cleanest Spotify Lossless path:
-
-1. Set Spotify to **Lossless**, volume **100%**, normalization **Normal** or off, and disable its equalizer.
-2. Open Windows **Settings -> System -> Sound**.
-3. Set **CABLE Input** (the Spotify output) to the same rate as your headphones, for example **24-bit, 44100 Hz**.
-4. Set the headphones/speakers device to the same rate, for example **24-bit, 44100 Hz**.
-5. Disable audio enhancements on both devices.
-6. Start Clubify; the UI shows the engine rate and the capture feed (`f32`).
-7. For a bit-transparent check, select **Clean** or bypass; auto level is not applied while effects are off.
-
-When both devices are 44.1 kHz, Spotify's 24-bit / 44.1 kHz stream stays at 44.1 kHz through Windows and the capture fork, into the float32 DSP. No clubify-side resample is inserted.
-
-## Architecture
-
-```text
-Spotify.exe (FLAC 24-bit / 44.1 kHz, decoded by Spotify)
-   |
-   |  Windows audio engine, float32 at the cable endpoint rate
-   v
-Windows Process Loopback (include process tree)
-   |
-   v
-vendor/loopback-capture (Rust N-API fork)
-   |
-   |  float32 stereo at the engine rate
-   |  AUTOCONVERTPCM + SRC_DEFAULT_QUALITY
-   |  silent packets delivered as zeros
-   v
-Block assembler -> float32 DSP chain -> sinc drift queue (unity deadband)
-                                                    |
-                                                    v
-                                    audify / WASAPI float32 render
-                                                    |
-                                                    v
-                                         headphones or speakers
-
-Tauri app --tray/autostart--> spawns Node engine
-Browser or WebView UI <--WebSocket--> engine control server
-```
-
-The engine follows the selected output device's preferred sample rate. Capture requests that same rate and format, so with the cable and output device both set to the same rate the path does no sample-rate conversion at all. The drift queue only corrects clock mismatch between the two devices, using a 32-tap windowed-sinc interpolator and staying on exactly 1.0 while the buffer is within its deadband.
-
-Project layout:
-
-```text
-src/
-  audio/        capture, discovery, output, queue, engine orchestration
-  dsp/          biquad, saturation, compressor, reverb, limiter, chain
-  server/       config storage and localhost control server
-  shared/       protocol types and presets
-ui/             Vue 3 + Pinia + Vite control UI
-src-tauri/      Tauri 2 shell, tray menu, autostart, engine lifecycle
-scripts/        production engine packaging
-vendor/         vendored loopback-capture fork (Rust) and its prebuilt addon
-```
-
-## Configuration
-
-The engine stores configuration at `%APPDATA%\clubify\config.json`. Set `CLUBIFY_CONFIG_DIR` to use a different directory for testing.
-
-Useful environment overrides for development and portable builds:
-
-- `CLUBIFY_SHOW=1` — show the Tauri window immediately instead of starting in the tray.
-- `CLUBIFY_NO_AUTOSTART=1` — do not enable autostart on a release launch.
-- `CLUBIFY_DEBUG_CONSOLE=1` — let the bundled engine inherit the parent console in release builds.
-- `CLUBIFY_ENGINE_BIN` — run a custom engine executable instead of the bundled one.
-- `CLUBIFY_PACKAGED=1` — force a debug Tauri build to use the packaged resource path.
-
-Capture is keyed on the image name `Spotify.exe`. If a Spotify distribution uses a different process name, change `spotifyImageName` in the config.
-
-Ports are fixed at `8787` for the control server and WebSocket. The server binds to `127.0.0.1` only.
-
-## API
-
-- `GET /api/health` returns engine status and the connected UI client count.
-- `GET /api/state` returns config, status, presets, and output devices.
-- `WS /ws` accepts the typed messages in `src/shared/types.ts`.
-
-All messages are JSON. Example:
-
-```json
-{ "type": "set-preset", "presetId": "warehouse" }
-```
-
-## Development checks
-
-```powershell
-npm test
-npm run typecheck
-npm run ui:typecheck
-npm run ui:build
-npm run build:capture
-cargo check --manifest-path vendor/loopback-capture/Cargo.toml
-cargo check --manifest-path src-tauri/Cargo.toml
-```
-
-`npm run build:capture` rebuilds the vendored native addon and updates `vendor/loopback-capture/build/Release/loopback_capture_addon.node`. The audio smoke test can also be exercised without Spotify by creating a process named `Spotify.exe` that renders a tone, but it will be audible. End-to-end testing with a synthetic process produced a stable 35–40 ms queue with zero underruns on the development machine.
-
-## Troubleshooting
-
-**Stuck on "Waiting for Spotify"**
-
-Spotify is open but no track is playing, or the process image name differs. Press play, then check the PID in the UI. Clubify captures the lowest `Spotify.exe` PID and includes its descendants.
-
-**I hear Spotify twice**
-
-Spotify is still routed to the normal output device. Route it to the virtual cable and keep Clubify's output on the headphones.
-
-**No virtual cable detected**
-
-Install VB-CABLE, reboot, then restart Clubify. The UI warning is informational and can be dismissed if you use per-app routing to a different silent endpoint.
-
-**Audio is quiet or loud**
-
-Auto level adapts slowly by design. Use input trim for manual gain and output gain for the final level. Auto level can be disabled.
-
-**Clicks, dropouts, or underruns**
-
-Raise the safety buffer, close CPU-heavy applications, or choose a different output device. The engine drops data rather than growing latency without bound; the overrun counter records that. Clock drift between the capture and output device is absorbed by a small playback-ratio correction instead of by trimming.
-
-**Lossless Spotify sounds gritty, dull, or distorted**
-
-Set Spotify's volume to 100% and control loudness in Clubify, set Spotify normalization to *Normal* or off (the *Loud* setting applies its own limiter), and disable Spotify's equalizer. Set the virtual cable and the output device to the same sample rate and disable audio enhancements on both. The DSP chain reserves headroom, limits with 3 ms of lookahead, and saturates only the low band. In Clean or bypass, auto level is skipped so the captured signal is passed through float32 without gain changes.
-
-**The engine reports "bundled loopback-capture fork is required"**
-
-The patched addon is missing. Run `npm run build:capture`, then `npm install` again if `node_modules` still points at the upstream package.
-
-**The UI shows different capture and engine rates**
-
-The engine follows the output device, and capture requests the same rate. If the capture rate differs, the cable endpoint rejected the requested format; set the cable and output device to the same rate in Windows Sound settings and restart Clubify.
-
-**Desktop window is not visible**
-
-The app starts in the tray. Left-click the tray icon. Use `$env:CLUBIFY_SHOW=1` for development launches.
-
-**Tauri build fails**
-
-Install the Rust toolchain and the Visual Studio C++ build tools with the Windows SDK. Run `npm run package:engine` before `tauri build` if you are not using `npm run desktop:build`.
-
-## Known limitations
-
-- Windows x64 only for the supported capture path.
-- Original audio suppression depends on routing Spotify to a virtual/silent endpoint.
-- Spotify is detected by process image name, not the Spotify Web API. No login or account access is involved.
-- Output is float32 stereo at the output device's preferred rate. Devices that cannot open that rate in shared mode fall back to 48 kHz and are resampled by Windows.
-- Capture uses the vendored `loopback-capture` fork in `vendor/loopback-capture`. It is pinned; upstream changes need to be merged manually. Rebuild it with `npm run build:capture` after changing the Rust source.
-- Spotify's normalized loudness is applied before capture. Clubify cannot recover peaks removed by Spotify's *Loud* limiter, so use *Normal* or off for lossless listening.
-- Total latency is typically above the 30 ms target because of shared-mode WASAPI, the virtual cable, the jitter queue, and the limiter lookahead. Lower the safety buffer to trade stability for latency.
-- The control server has no authentication because it binds to localhost. Do not expose port 8787.
-- The production package bundles Node and therefore is substantially larger than a pure Rust Tauri app.
+Open http://127.0.0.1:8787 to control the engine from the browser.
 
 ## Third-party components
 

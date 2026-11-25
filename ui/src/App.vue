@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
 import BrandMark from "./components/BrandMark.vue";
 import LevelMeter from "./components/LevelMeter.vue";
+import LicensesPanel from "./components/LicensesPanel.vue";
 import RangeSlider from "./components/RangeSlider.vue";
 import StatTile from "./components/StatTile.vue";
 import { formatPids, formatUptime, phaseLabel } from "./lib/format";
@@ -55,6 +56,7 @@ onBeforeUnmount(() => engine.disconnect());
       </p>
       <p v-if="socketError" class="error-text">{{ socketError }}</p>
     </div>
+    <LicensesPanel class="loading-licenses" />
   </main>
 
   <main v-else class="shell" :style="{ '--accent': accent }">
@@ -425,6 +427,8 @@ onBeforeUnmount(() => engine.disconnect());
       </div>
     </details>
 
+    <LicensesPanel />
+
     <footer>
       <span>Spotify</span>
       <span class="arrow">→</span>
@@ -433,6 +437,7 @@ onBeforeUnmount(() => engine.disconnect());
       <span>Club DSP</span>
       <span class="arrow">→</span>
       <span>WASAPI out</span>
+      <span class="license-note">MIT licensed · © 2026 Luke Grandke</span>
       <span class="connection" :class="connection">
         {{ connection === "open" ? "LIVE" : connection.toUpperCase() }}
       </span>

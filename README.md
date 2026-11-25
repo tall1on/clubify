@@ -147,5 +147,14 @@ Open http://127.0.0.1:8787 to control the engine from the browser.
 
 - [loopback-capture](https://github.com/WerdoxDev/loopback-capture) — MIT, vendored fork under `vendor/loopback-capture`; adds float32 capture, an explicit sample rate, `SRC_DEFAULT_QUALITY`, and silence-preserving delivery.
 - [audify](https://github.com/almoghamdani/audify) — MIT, RtAudio/WASAPI output and Opus bindings.
+- [node-addon-api](https://github.com/nodejs/node-addon-api) — MIT, compiled into audify's native addon.
+- [RtAudio](https://github.com/thestk/rtaudio) — MIT, compiled into audify's native addon.
+- [Opus](https://opus-codec.org) — BSD-3-Clause, compiled into audify's native addon.
 - [Tauri](https://tauri.app) — Apache-2.0/MIT.
 - Node.js runtime (MIT) is bundled in production builds.
+
+## License
+
+Clubify is released under the [MIT License](LICENSE). Copyright (c) 2026 Luke Grandke.
+
+The app includes a **Licenses & third-party notices** panel with the project license and the full texts of bundled dependencies. It is generated from the installed npm tree and the Cargo dependency graph by `npm run licenses:generate`, which also runs before every UI or desktop build.

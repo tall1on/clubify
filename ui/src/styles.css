@@ -660,6 +660,228 @@ select:focus {
   padding-bottom: 20px;
 }
 
+.licenses {
+  padding: 0 24px;
+  margin-bottom: 20px;
+}
+
+.licenses > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.licenses > summary::-webkit-details-marker {
+  display: none;
+}
+
+.licenses > summary .eyebrow {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.licenses > summary strong {
+  display: block;
+  font-size: 16px;
+}
+
+.licenses .chevron,
+.license-entry .entry-chevron {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  rotate: 45deg;
+  transition: rotate 0.2s ease;
+}
+
+.licenses[open] > summary .chevron {
+  rotate: 225deg;
+}
+
+.licenses-body {
+  display: grid;
+  gap: 26px;
+  padding-bottom: 24px;
+}
+
+.license-block h3 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.license-block .section-heading {
+  flex-wrap: wrap;
+}
+
+.license-intro {
+  max-width: 82ch;
+  margin: 0 0 14px;
+  color: color-mix(in srgb, var(--text) 74%, transparent);
+  font-size: 13px;
+}
+
+.license-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.license-group {
+  margin-top: 16px;
+}
+
+.license-group-title {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.license-search {
+  display: block;
+  margin: 0 0 14px;
+}
+
+.license-search input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--panel-strong);
+  outline: none;
+  font-size: 13px;
+}
+
+.license-search input:focus {
+  border-color: var(--accent);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.license-entry {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.license-entry > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.license-entry > summary::-webkit-details-marker {
+  display: none;
+}
+
+.license-name {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.license-version {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.license-tag {
+  max-width: 46%;
+  margin-left: auto;
+  padding: 3px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-align: right;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.license-entry[open] .entry-chevron {
+  rotate: 225deg;
+}
+
+.license-entry-body {
+  padding: 0 14px 14px;
+}
+
+.license-copyright {
+  margin: 0 0 6px;
+  color: color-mix(in srgb, var(--text) 82%, transparent);
+  font-size: 12px;
+  white-space: pre-line;
+}
+
+.license-entry-body .fine-print {
+  margin: 0 0 10px;
+}
+
+.license-text {
+  max-height: 340px;
+  margin: 10px 0;
+  padding: 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.32);
+  color: color-mix(in srgb, var(--text) 78%, transparent);
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.license-source {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.license-footnote {
+  margin: 14px 0 0;
+  max-width: 82ch;
+}
+
+footer .license-note {
+  margin-left: auto;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+footer .license-note + .connection {
+  margin-left: 0;
+}
+
 footer {
   display: flex;
   align-items: center;
@@ -701,6 +923,11 @@ footer .arrow {
   border-radius: 24px;
   border: 1px solid var(--line);
   background: var(--panel);
+}
+
+.loading-licenses {
+  max-width: 760px;
+  margin: 24px auto 0;
 }
 
 .loading-card .brand-mark {
@@ -768,6 +995,14 @@ footer .arrow {
 
   .section-heading {
     align-items: flex-start;
+  }
+
+  .licenses {
+    padding: 0 18px;
+  }
+
+  .license-tag {
+    max-width: 40%;
   }
 
   footer .connection {

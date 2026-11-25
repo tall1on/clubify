@@ -41,7 +41,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Luke Grandke",
+    "copyright": "Copyright (c) 2026 Luke Grandke",
+    "licenseFile": "../LICENSE",
     "resources": {
+      "../LICENSE": "LICENSE",
       "resources/node.exe": "node.exe",
       "resources/NODE-LICENSE": "NODE-LICENSE",
       "resources/engine": "engine"

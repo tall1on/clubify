@@ -122,7 +122,8 @@ src/
   shared/       protocol types and presets
 ui/             Vue 3 + Pinia + Vite control UI
 src-tauri/      Tauri 2 shell, tray menu, autostart, engine lifecycle
-scripts/        production engine packaging
+scripts/        production engine packaging and license generation
+licenses/       curated license-text overrides for packages that ship without a license file
 vendor/         vendored loopback-capture fork (Rust) and its prebuilt addon
 ```
 
@@ -161,12 +162,25 @@ npm test
 npm run typecheck
 npm run ui:typecheck
 npm run ui:build
+npm run licenses:generate
+npm run licenses:check
 npm run build:capture
 cargo check --manifest-path vendor/loopback-capture/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 `npm run build:capture` rebuilds the vendored native addon and updates `vendor/loopback-capture/build/Release/loopback_capture_addon.node`. The audio smoke test can also be exercised without Spotify by creating a process named `Spotify.exe` that renders a tone, but it will be audible. End-to-end testing with a synthetic process produced a stable 35–40 ms queue with zero underruns on the development machine.
+
+## Licenses
+
+The in-app license page is generated, not hand-maintained. `npm run licenses:generate` writes `ui/public/licenses.json` from:
+
+- `LICENSE` and `package.json` for the project license.
+- The installed npm production dependency tree from `package-lock.json` and `node_modules`.
+- `cargo tree` and `cargo metadata` for `src-tauri/Cargo.toml` and `vendor/loopback-capture/Cargo.toml`, resolved for the Windows target.
+- Optional `licenses/overrides/<npm|cargo>/<package>.txt` files when a package distributes a license identifier but no license text.
+
+The generator runs automatically before `ui:dev`, `ui:build`, and `desktop:build`. After adding or upgrading a dependency, run it directly and commit the refreshed `ui/public/licenses.json`. The script stays successful without Cargo by keeping previously generated Rust entries, and it is never necessary to edit `licenses.json` by hand. `ui:build` uses `licenses:check`, which fails the build if any package has no license text and no override, so new dependencies cannot silently ship without a notice.
 
 ## Developer troubleshooting
 

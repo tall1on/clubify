@@ -2,6 +2,8 @@
 name = "clubify"
 version = "0.1.1"
 description = "Spotify-only nightclub DSP for Windows"
+authors = ["Luke Grandke"]
+license = "MIT"
 edition = "2021"
 
 [build-dependencies]

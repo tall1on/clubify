@@ -13,7 +13,7 @@ use std::{
     os::windows::ffi::OsStrExt,
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{fence, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, TryRecvError},
     },
     thread,
@@ -63,6 +63,7 @@ const LEGACY_MEASURE_SPAN: Duration = Duration::from_millis(1200);
 const REPLAY_BUFFER_MS: u64 = 64;
 const RATE_SNAP_TOLERANCE: f64 = 0.015;
 const RATE_SWITCH_TOLERANCE: f64 = 0.005;
+const RATE_SWITCH_HITS: u32 = 2;
 const PASSTHROUGH_TOLERANCE: f64 = 0.001;
 const INJECT_TIMEOUT: u32 = 15_000;
 const ERR_OTHER_OWNER: u32 = 20;
@@ -208,8 +209,12 @@ impl Shared {
             if first == 0 || first & 1 != 0 {
                 continue;
             }
+            // Keep the payload loads inside the seqlock window even on
+            // architectures that allow them to move across the seq loads.
+            fence(Ordering::SeqCst);
             let qpc = header.qpc.load(Ordering::Relaxed);
             let bytes = header.write_bytes.load(Ordering::Acquire);
+            fence(Ordering::SeqCst);
             let second = header.seq.load(Ordering::Acquire);
             if first == second {
                 return Some((bytes, qpc));
@@ -343,6 +348,8 @@ fn read_loop(
     );
     let mut flow = Flow::Measuring;
     let mut flow_rate = expected_rate as f64;
+    let mut pending_rate: Option<f64> = None;
+    let mut pending_hits = 0u32;
     let mut last_packet: Option<Instant> = None;
     let mut dropped_seen = 0u64;
     while sink.active() && matches!(stop.try_recv(), Err(TryRecvError::Empty)) {
@@ -352,6 +359,11 @@ fn read_loop(
         if dropped > dropped_seen {
             sink.note_dropped((dropped - dropped_seen) as usize);
             dropped_seen = dropped;
+            // A producer overflow leaves a hole in write_bytes, which would
+            // make the measured rate too low; start the window over.
+            probe.restart();
+            pending_rate = None;
+            pending_hits = 0;
         }
 
         let write = shared.write_position();
@@ -425,9 +437,29 @@ fn read_loop(
                 _ => {
                     // Steady-state background probe: only re-plan when the
                     // render rate actually moved (for example a device switch).
-                    if (rate - flow_rate).abs() / flow_rate.max(1.0) > RATE_SWITCH_TOLERANCE {
-                        flow = choose_flow(rate, expected_rate);
-                        flow_rate = rate;
+                    // Require two consecutive windows so a single noisy
+                    // measurement cannot interrupt playback.
+                    let moved =
+                        (rate - flow_rate).abs() / flow_rate.max(1.0) > RATE_SWITCH_TOLERANCE;
+                    if moved {
+                        let consistent = pending_rate.is_some_and(|pending| {
+                            (pending - rate).abs() / rate.max(1.0) <= RATE_SWITCH_TOLERANCE
+                        });
+                        if consistent {
+                            pending_hits += 1;
+                        } else {
+                            pending_rate = Some(rate);
+                            pending_hits = 1;
+                        }
+                        if pending_hits >= RATE_SWITCH_HITS {
+                            flow = choose_flow(rate, expected_rate);
+                            flow_rate = rate;
+                            pending_rate = None;
+                            pending_hits = 0;
+                        }
+                    } else {
+                        pending_rate = None;
+                        pending_hits = 0;
                     }
                     probe.restart();
                 }
@@ -618,7 +650,7 @@ impl RateProbe {
         Some(snap_rate(rate))
     }
 
-    fn buffer(&mut self, packet: Vec<u8>, sink: &AudioSink) {
+    fn buffer(&mut self, packet: Vec<u8>, _sink: &AudioSink) {
         self.buffered_bytes += packet.len();
         self.buffered.push_back(packet);
         while self.buffered_bytes > self.max_buffered_bytes {
@@ -626,7 +658,9 @@ impl RateProbe {
                 break;
             };
             self.buffered_bytes -= oldest.len();
-            sink.note_dropped(oldest.len());
+            // Dropping the stale head of the measurement window is deliberate,
+            // not a dropout: only the newest audio is replayed once the rate is
+            // known, so this must not inflate the capture drop counters.
         }
     }
 

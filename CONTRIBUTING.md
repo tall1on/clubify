@@ -98,12 +98,12 @@ vendor/spotify-tap (shared-memory ring, heartbeat fail-open)
    |  (often 44.1 kHz) and resamples it to the engine rate
    v
 Block assembler -> float32 DSP chain -> sinc drift queue (adaptive clock correction)
-                                                     |
-                                                     v
-                                     audify / WASAPI float32 render
-                                                     |
-                                                     v
-                                          headphones or speakers
+                                                    |
+                                                    v
+                                    native WASAPI float32 render ring
+                                                    |
+                                                    v
+                                         headphones or speakers
 
 Tauri app --tray/autostart--> spawns Node engine
 Browser or WebView UI <--WebSocket--> engine control server

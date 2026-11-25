@@ -38,6 +38,7 @@ const TAIL_INTERVAL_MS = 10;
 const STARTUP_TRIM_MS = 1_500;
 const DEVICE_CACHE_MS = 5_000;
 const OUTPUT_REOPEN_MS = 2_000;
+const TAIL_MAX_MS = 8_000;
 const RESAMPLER_MARGIN_FRAMES = 64;
 // Drift correction only exists to track clock difference between Spotify and
 // the output device, which is tens of ppm. Bending pitch even briefly is much
@@ -111,6 +112,10 @@ export class AudioEngine extends EventEmitter {
   private lastDriftAt = 0;
   private lastTailAt = 0;
   private tailActive = false;
+  private tailStartedAt = 0;
+  private tailExhausted = false;
+  private deviceListError: string | null = null;
+  private lastDefaultFollowAt = 0;
   private nativeStats: NativeOutputStats | null = null;
   private captureStats: CaptureDeliveryStats | null = null;
   private lastOutputReopenAt = 0;
@@ -293,9 +298,12 @@ export class AudioEngine extends EventEmitter {
     try {
       this.devices = this.output.listDevices();
       this.devicesRefreshedAt = now;
+      this.deviceListError = null;
     } catch (error) {
+      // Device enumeration failure is not an output-stream failure: reopening
+      // a healthy stream on a transient list error would cause a dropout.
       this.devicesRefreshedAt = now;
-      if (this.devices.length === 0) this.outputError = errorMessage(error);
+      this.deviceListError = errorMessage(error);
     }
   }
 
@@ -385,7 +393,7 @@ export class AudioEngine extends EventEmitter {
         this.hasProcessedAudio &&
         this.capture.active &&
         Date.now() - this.lastCaptureAt > 150 &&
-        stats.fillFrames < target / 4;
+        stats.fillFrames < (target * 3) / 5;
       if (!this.hasProcessedAudio || !this.capture.active || paused) {
         this.pushSilence(chunk);
       }
@@ -539,6 +547,7 @@ export class AudioEngine extends EventEmitter {
     this.hasProcessedAudio = false;
     this.autoGain = 1;
     this.tailActive = false;
+    this.tailExhausted = false;
     this.lastTailAt = 0;
     this.resetDrift();
     this.tapWarning = null;
@@ -593,6 +602,7 @@ export class AudioEngine extends EventEmitter {
     this.capture.stop();
     this.lastCaptureAt = Date.now();
     this.tailActive = false;
+    this.tailExhausted = false;
     this.lastTailAt = 0;
     this.silencingMode = "none";
     this.emitStatus();
@@ -602,6 +612,7 @@ export class AudioEngine extends EventEmitter {
     this.lastCaptureAt = Date.now();
     this.lastChunkCount += 1;
     this.tailActive = false;
+    this.tailExhausted = false;
     this.lastTailAt = 0;
     if (this.firstPacketAt === 0) this.firstPacketAt = this.lastCaptureAt;
     if (!this.hasProcessedAudio) {
@@ -697,6 +708,7 @@ export class AudioEngine extends EventEmitter {
    */
   private pumpTail(): void {
     if (this.stopping || !this.hasProcessedAudio || !this.capture.active) return;
+    if (this.tailExhausted) return;
     const now = Date.now();
     if (!this.tailActive) {
       const stats = this.output.stats();
@@ -708,7 +720,17 @@ export class AudioEngine extends EventEmitter {
       const quiet = now - this.lastCaptureAt >= quietFor;
       if (!hungry && !quiet) return;
       this.tailActive = true;
+      this.tailStartedAt = now;
       this.lastTailAt = 0;
+    }
+    if (now - this.tailStartedAt > TAIL_MAX_MS) {
+      // The reverb/delay tail has long decayed; stop burning DSP cycles on a
+      // paused stream. The pump's idle guard keeps the ring fed with raw
+      // silence until real audio returns.
+      this.tailActive = false;
+      this.tailExhausted = true;
+      this.lastTailAt = 0;
+      return;
     }
     const elapsedMs =
       this.lastTailAt === 0
@@ -740,6 +762,7 @@ export class AudioEngine extends EventEmitter {
       this.queue.clear();
     }
     this.captureStats = this.capture.stats();
+    this.followDefaultDevice();
     if (this.outputError) {
       const now = Date.now();
       if (this.output.supported && now - this.lastOutputReopenAt >= OUTPUT_REOPEN_MS) {
@@ -747,6 +770,32 @@ export class AudioEngine extends EventEmitter {
         this.openOutput();
       }
     }
+    this.emitStatus();
+  }
+
+  /**
+   * When the engine is set to "system default", reopening follows a Windows
+   * default-device change instead of staying on the old endpoint until restart.
+   * Enumeration is TTL-cached, so this costs at most one scan per cache window.
+   */
+  private followDefaultDevice(): void {
+    if (this.outputError) return;
+    if (this.config.outputDeviceName !== null || !this.output.isOpen) return;
+    if (Date.now() - this.devicesRefreshedAt >= DEVICE_CACHE_MS) {
+      this.refreshDevices(true);
+    }
+    if (Date.now() - this.lastDefaultFollowAt < DEVICE_CACHE_MS) return;
+    const defaultDevice = this.devices.find((device) => device.isDefault);
+    if (!defaultDevice || !this.outputDeviceName) return;
+    if (defaultDevice.name === this.outputDeviceName) return;
+    this.lastDefaultFollowAt = Date.now();
+    this.queue.clear();
+    this.nativeStats = null;
+    this.capture.stop();
+    this.output.stop();
+    this.setSampleRate(this.output.preferredRate(null));
+    this.openOutput();
+    void this.pollSpotify();
     this.emitStatus();
   }
 
@@ -760,7 +809,10 @@ export class AudioEngine extends EventEmitter {
 
   private status(): EngineStatus {
     const level = this.level();
-    const lastError = this.outputError ?? this.captureError;
+    const lastError =
+      this.outputError ??
+      this.captureError ??
+      (this.devices.length === 0 ? this.deviceListError : null);
     const phase = this.phase();
     const waitingMessage =
       this.spotifyPids.length > 0

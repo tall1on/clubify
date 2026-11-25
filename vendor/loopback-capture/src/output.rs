@@ -22,7 +22,7 @@ use windows::{
     core::{w, PCWSTR, PWSTR},
     Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
-        Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Foundation::{CloseHandle, HANDLE, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Media::{
             Audio::{
                 eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice,
@@ -53,6 +53,10 @@ const CHANNELS: u16 = 2;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const RING_SECONDS: u32 = 1;
+/// Render-event wait bound. A device that is unplugged often stops signalling
+/// without raising an error, so the loop must wake on its own and poll.
+const RENDER_WAIT_MS: u32 = 200;
+const MAX_WAIT_TIMEOUTS: u32 = 10;
 
 #[derive(Clone, Debug)]
 pub struct OutputDevice {
@@ -188,7 +192,7 @@ struct OutputState {
 
 pub struct OutputSession {
     state: Arc<OutputState>,
-    stop: OwnedEvent,
+    stop: Option<OwnedEvent>,
     finished: Receiver<()>,
     thread: Option<JoinHandle<Result<(), String>>>,
 }
@@ -226,7 +230,7 @@ impl OutputSession {
             .map_err(|error| format!("Failed to start the audio output thread: {error}"))?;
         let mut session = Self {
             state,
-            stop,
+            stop: Some(stop),
             finished: completion,
             thread: Some(thread),
         };
@@ -277,17 +281,20 @@ impl OutputSession {
     }
 
     pub fn stop(&mut self) {
-        let _ = self.stop.signal();
+        if let Some(event) = &self.stop {
+            let _ = event.signal();
+        }
         let finished = self.finished.recv_timeout(STOP_TIMEOUT);
         let Some(thread) = self.thread.take() else {
             return;
         };
         if finished.is_ok() {
             let _ = thread.join();
-        } else {
-            // A driver call is stuck; the thread owns its interfaces and the
-            // ring stays valid because JS dropped this session's Arc handles.
-            drop(thread);
+        } else if let Some(event) = self.stop.take() {
+            // A driver call is stuck and its thread is still waiting on the stop
+            // event. Leaking the handle keeps that wait valid; the process ends
+            // with at most one of these after a driver failure.
+            std::mem::forget(event);
         }
     }
 }
@@ -295,6 +302,40 @@ impl OutputSession {
 impl Drop for OutputSession {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WaitAction {
+    Stop,
+    Render,
+    Poll,
+    Fatal(&'static str),
+}
+
+/// Classifies a `WaitForMultipleObjects` result. Timeouts are expected (they
+/// drive the invalidation poll); a run of them means the endpoint stopped
+/// signalling and the stream should be reported dead so the engine reopens it.
+fn classify_wait(wait: WAIT_EVENT, consecutive_timeouts: &mut u32) -> WaitAction {
+    if wait.0 == WAIT_OBJECT_0.0 + 1 {
+        *consecutive_timeouts = 0;
+        return WaitAction::Stop;
+    }
+    if wait == WAIT_OBJECT_0 {
+        *consecutive_timeouts = 0;
+        return WaitAction::Render;
+    }
+    if wait == WAIT_TIMEOUT {
+        *consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+        if *consecutive_timeouts >= MAX_WAIT_TIMEOUTS {
+            return WaitAction::Fatal("The output stream stopped signalling");
+        }
+        return WaitAction::Poll;
+    }
+    if wait == WAIT_FAILED {
+        WaitAction::Fatal("The output event wait failed")
+    } else {
+        WaitAction::Fatal("The output event wait returned an unexpected value")
     }
 }
 
@@ -390,24 +431,31 @@ fn render_loop(
 
     let mut scratch = vec![0.0f32; period * CHANNELS as usize];
     let mut result = Ok(());
+    let mut timeouts = 0u32;
     loop {
         let handles = [render_event.0, stop];
         // SAFETY: both handles are owned by this thread for the whole loop.
-        let wait = unsafe { WaitForMultipleObjects(&handles, false, u32::MAX) };
-        if wait.0 == WAIT_OBJECT_0.0 + 1 {
-            break;
-        }
-        if wait != WAIT_OBJECT_0 {
-            let message = if wait == WAIT_FAILED {
-                "The output event wait failed".to_owned()
-            } else if wait == WAIT_TIMEOUT {
-                "The output event wait timed out".to_owned()
-            } else {
-                format!("The output event wait returned {wait:?}")
-            };
-            *state.fatal.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
-            result = Err(message);
-            break;
+        let wait = unsafe { WaitForMultipleObjects(&handles, false, RENDER_WAIT_MS) };
+        match classify_wait(wait, &mut timeouts) {
+            WaitAction::Stop => break,
+            WaitAction::Poll => {
+                // The event did not arrive in time. Polling forces an
+                // invalidated endpoint to surface its error instead of leaving
+                // this thread parked forever with a full-looking ring.
+                if let Err(error) = unsafe { client.GetCurrentPadding() } {
+                    let message = format!("Could not poll the render padding: {error}");
+                    *state.fatal.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
+                    result = Err(message);
+                    break;
+                }
+                continue;
+            }
+            WaitAction::Fatal(message) => {
+                *state.fatal.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.to_owned());
+                result = Err(message.to_owned());
+                break;
+            }
+            WaitAction::Render => {}
         }
         let rendered = (|| -> Result<(), String> {
             let padding = unsafe { client.GetCurrentPadding() }
@@ -707,5 +755,46 @@ mod tests {
         let mut out = vec![0.0f32; 300 * CHANNELS as usize];
         assert_eq!(ring.pull(&mut out), 300);
         assert!(out.iter().all(|sample| *sample >= 1.0));
+    }
+
+    #[test]
+    fn wait_timeouts_poll_then_report_a_stalled_stream() {
+        let mut timeouts = 0;
+        for _ in 0..(MAX_WAIT_TIMEOUTS - 1) {
+            assert_eq!(classify_wait(WAIT_TIMEOUT, &mut timeouts), WaitAction::Poll);
+        }
+        assert_eq!(
+            classify_wait(WAIT_TIMEOUT, &mut timeouts),
+            WaitAction::Fatal("The output stream stopped signalling")
+        );
+    }
+
+    #[test]
+    fn a_render_event_resets_the_timeout_streak() {
+        let mut timeouts = MAX_WAIT_TIMEOUTS - 1;
+        assert_eq!(
+            classify_wait(WAIT_OBJECT_0, &mut timeouts),
+            WaitAction::Render
+        );
+        assert_eq!(timeouts, 0);
+        assert_eq!(classify_wait(WAIT_TIMEOUT, &mut timeouts), WaitAction::Poll);
+    }
+
+    #[test]
+    fn stop_and_unexpected_waits_are_distinguished() {
+        let mut timeouts = 3;
+        assert_eq!(
+            classify_wait(WAIT_EVENT(WAIT_OBJECT_0.0 + 1), &mut timeouts),
+            WaitAction::Stop
+        );
+        let mut timeouts = 0;
+        assert_eq!(
+            classify_wait(WAIT_FAILED, &mut timeouts),
+            WaitAction::Fatal("The output event wait failed")
+        );
+        assert_eq!(
+            classify_wait(WAIT_EVENT(7), &mut timeouts),
+            WaitAction::Fatal("The output event wait returned an unexpected value")
+        );
     }
 }

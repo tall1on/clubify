@@ -5,7 +5,7 @@ Technical documentation for building and contributing to Clubify. For a user-fac
 ## Requirements
 
 - Windows 11 build 20348 or newer (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`).
-- Node.js 20 or newer.
+- Node.js 22.12 or newer.
 - A virtual audio cable such as VB-CABLE, or any unused output endpoint you can route Spotify to.
 - For desktop builds only: Rust, Cargo, and the Visual C++ build tools plus Windows SDK.
 - Rebuilding the bundled capture fork requires Rust 1.88+ and the Windows SDK. A prebuilt Windows x64 addon is committed, so normal installs do not need Rust.
@@ -82,7 +82,7 @@ git push origin main
 
 The updater keypair was generated with `npx tauri signer generate -w "$env:USERPROFILE\.tauri\clubify.key"`. The public key is embedded in `src-tauri/tauri.conf.json`. Add the private key file contents as the `TAURI_SIGNING_PRIVATE_KEY` repository secret, plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has a password. Keep the private key safe: installed copies cannot verify updates signed with a different key. Builds made before the updater was added have to be replaced manually once.
 
-The self-hosted runner needs the `self-hosted`, `Windows`, and `X64` labels, Node.js 20, Rust, and the Visual Studio C++ build tools with the Windows SDK. GitHub Releases must be publicly readable because the updater does not ship a GitHub token. `npm run desktop:build` still produces unsigned local bundles; signed updater artifacts are created only by the release workflow.
+The self-hosted runner needs the `self-hosted`, `Windows`, and `X64` labels, Node.js 22.12 or newer, Rust, and the Visual Studio C++ build tools with the Windows SDK. GitHub Releases must be publicly readable because the updater does not ship a GitHub token. `npm run desktop:build` still produces unsigned local bundles; signed updater artifacts are created only by the release workflow.
 
 ## Architecture
 
@@ -174,6 +174,8 @@ cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 `npm run build:capture` rebuilds the vendored native addon and updates `vendor/loopback-capture/build/Release/loopback_capture_addon.node`. The audio smoke test can also be exercised without Spotify by creating a process named `Spotify.exe` that renders a tone, but it will be audible. End-to-end testing with a synthetic process produced a stable 35–40 ms queue with zero underruns on the development machine.
+
+`typescript` is aliased to `typescript-native-bridge` (pinned exactly, with a matching npm `typescript` override), so `tsc`, `vue-tsc`, and editors all use the classic TypeScript API on top of the native tsgo 7 checker. The first type-check in a process prints `TNB ACTIVE` to stderr. Update the alias and override together.
 
 ## Licenses
 

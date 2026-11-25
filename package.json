@@ -24,11 +24,11 @@
         "package:engine": "npm run build && node scripts/package-engine.mjs",
         "desktop:build": "npm run package:engine && tauri build",
         "build:capture": "node vendor/loopback-capture/scripts/build-native.mjs",
-        "ui:typecheck": "node scripts/ui-typecheck.cjs -p ui/tsconfig.json --noEmit",
+        "ui:typecheck": "vue-tsc -p ui/tsconfig.json --noEmit",
         "version:bump": "node scripts/bump-version.mjs"
     },
     "engines": {
-        "node": ">=20"
+        "node": ">=22.12.0"
     },
     "dependencies": {
         "audify": "^1.10.1",
@@ -41,13 +41,15 @@
         "@tauri-apps/cli": "^2.12.6",
         "@types/node": "^26.6.10",
         "@types/ws": "^8.18.2",
-        "@typescript/typescript6": "^6.0.2",
         "@vitejs/plugin-vue": "^6.0.11",
         "concurrently": "^10.0.7",
         "tsx": "^4.23.15",
-        "typescript": "^7.0.2",
+        "typescript": "npm:typescript-native-bridge@6.0.3-bridge.19.tsgo.7.0.2",
         "vite": "^8.3.8",
         "vitest": "^5.1.2",
         "vue-tsc": "^3.3.14"
+    },
+    "overrides": {
+        "typescript": "$typescript"
     }
 }

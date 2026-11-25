@@ -1,6 +1,6 @@
 {
     "name": "clubify",
-    "version": "0.2.4",
+    "version": "0.2.5",
     "private": true,
     "description": "Spotify-only nightclub DSP for Windows",
     "author": "Luke Grandke",

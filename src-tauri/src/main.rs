@@ -25,12 +25,16 @@ use tauri_plugin_updater::UpdaterExt;
 const ENGINE_PORT: u16 = 8787;
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const UPDATE_LOG_LIMIT_BYTES: u64 = 256 * 1024;
+const WINDOW_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
 
 struct EngineState(Mutex<Option<Child>>);
 struct Quitting(Mutex<bool>);
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app);
+        }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -41,6 +45,8 @@ fn main() {
         .setup(|app| {
             spawn_engine(app.handle());
             spawn_update_check(app.handle().clone());
+
+            apply_window_icon(app.handle());
 
             if env::var_os("CLUBIFY_SHOW").is_some()
                 || env::args().any(|argument| argument == "--show")
@@ -127,8 +133,8 @@ fn main() {
                         show_window(tray.app_handle());
                     }
                 });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
+            if let Ok(icon) = tauri::image::Image::from_bytes(WINDOW_ICON_BYTES) {
+                tray = tray.icon(icon);
             }
             tray.build(app)?;
             Ok(())
@@ -157,6 +163,15 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+fn apply_window_icon(app: &tauri::AppHandle) {
+    let Ok(icon) = tauri::image::Image::from_bytes(WINDOW_ICON_BYTES) else {
+        return;
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_icon(icon);
     }
 }
 

@@ -46,6 +46,7 @@ export interface Preset {
   tagline: string;
   accent: string;
   params: DspParams;
+  custom?: boolean;
 }
 
 export interface AppConfig {
@@ -110,6 +111,8 @@ export interface PublicState {
 export type ClientMessage =
   | { type: "set-effects"; effects: Partial<DspParams> }
   | { type: "set-preset"; presetId: string }
+  | { type: "save-preset"; name: string }
+  | { type: "delete-preset"; presetId: string }
   | { type: "set-output-device"; deviceName: string | null }
   | { type: "set-buffer"; ms: number }
   | { type: "set-auto-gain"; enabled: boolean }

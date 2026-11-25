@@ -13,6 +13,7 @@ const engine = useEngineStore();
 const { state, connection, socketError } = storeToRefs(engine);
 
 const showGuide = ref(true);
+const presetName = ref("");
 
 const config = computed(() => state.value!.config);
 const status = computed(() => state.value!.status);
@@ -36,6 +37,13 @@ function onOutputDeviceChange(event: Event) {
 
 function onAutoGainChange(event: Event) {
   engine.setAutoGain((event.target as HTMLInputElement).checked);
+}
+
+function savePreset() {
+  const name = presetName.value.trim();
+  if (!name) return;
+  engine.savePreset(name);
+  presetName.value = "";
 }
 
 onMounted(() => engine.connect());
@@ -136,19 +144,43 @@ onBeforeUnmount(() => engine.disconnect());
         </div>
         <span class="fine-print">Instant recall</span>
       </div>
-      <div class="preset-grid">
-        <button
-          v-for="candidate in presets"
-          :key="candidate.id"
-          class="preset-card"
-          :class="{ selected: config.presetId === candidate.id }"
-          :style="{ '--preset-accent': candidate.accent }"
-          @click="engine.setPreset(candidate.id)"
-        >
-          <span class="preset-swatch"></span>
-          <span class="preset-name">{{ candidate.name }}</span>
-          <span class="preset-tagline">{{ candidate.tagline }}</span>
+      <div class="preset-tools">
+        <input
+          v-model="presetName"
+          class="preset-input"
+          type="text"
+          maxlength="60"
+          placeholder="Name this preset"
+          @keydown.enter="savePreset"
+        />
+        <button class="ghost-button preset-save" :disabled="!presetName.trim()" @click="savePreset">
+          Save current
         </button>
+      </div>
+      <div class="preset-grid">
+        <div v-for="candidate in presets" :key="candidate.id" class="preset-item">
+          <button
+            class="preset-card"
+            :class="{ selected: config.presetId === candidate.id }"
+            :style="{ '--preset-accent': candidate.accent }"
+            @click="engine.setPreset(candidate.id)"
+          >
+            <span class="preset-swatch"></span>
+            <span class="preset-name">{{ candidate.name }}</span>
+            <span class="preset-tagline">{{ candidate.tagline }}</span>
+            <span v-if="candidate.custom" class="preset-badge">Custom</span>
+          </button>
+          <button
+            v-if="candidate.custom"
+            class="preset-delete"
+            type="button"
+            :aria-label="`Delete ${candidate.name}`"
+            title="Delete preset"
+            @click.stop="engine.deletePreset(candidate.id)"
+          >
+            ×
+          </button>
+        </div>
       </div>
     </section>
 

@@ -92,6 +92,14 @@ export const useEngineStore = defineStore("engine", () => {
     send({ type: "set-preset", presetId });
   }
 
+  function savePreset(name: string) {
+    send({ type: "save-preset", name });
+  }
+
+  function deletePreset(presetId: string) {
+    send({ type: "delete-preset", presetId });
+  }
+
   function setOutputDevice(deviceName: string | null) {
     send({ type: "set-output-device", deviceName });
   }
@@ -125,6 +133,8 @@ export const useEngineStore = defineStore("engine", () => {
     send,
     setEffects,
     setPreset,
+    savePreset,
+    deletePreset,
     setOutputDevice,
     setBuffer,
     setAutoGain,

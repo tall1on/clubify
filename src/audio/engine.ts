@@ -16,6 +16,7 @@ import {
   type EnginePhase,
   type EngineStatus,
   type OutputDevice,
+  type Preset,
   type PublicState,
 } from "../shared/types.js";
 import { PRESETS, clampParams, getPreset } from "../shared/presets.js";
@@ -24,7 +25,12 @@ import { PlaybackQueue } from "./playback-queue.js";
 import { SpotifyCapture } from "./spotify-capture.js";
 import { findSpotifyPids } from "./spotify-discovery.js";
 import { WasapiOutput } from "./wasapi-output.js";
-import { mergeEffects, saveConfig } from "../server/config-store.js";
+import {
+  loadCustomPresets,
+  mergeEffects,
+  saveConfig,
+  saveCustomPresets,
+} from "../server/config-store.js";
 
 const DISCOVERY_INTERVAL_MS = 2_000;
 const STATUS_INTERVAL_MS = 250;
@@ -34,6 +40,7 @@ const SILENCE_AFTER_MS = 120;
 
 export class AudioEngine extends EventEmitter {
   private readonly config: AppConfig;
+  private customPresets: Preset[];
   private dsp: DspChain;
   private readonly output = new WasapiOutput();
   private readonly capture = new SpotifyCapture();
@@ -79,6 +86,7 @@ export class AudioEngine extends EventEmitter {
   constructor(config: AppConfig) {
     super();
     this.config = config;
+    this.customPresets = loadCustomPresets();
     this.targetFrames = Math.round((config.targetBufferMs * this.sampleRate) / 1000);
     this.dsp = new DspChain(this.sampleRate, config.effects, DSP_BLOCK_FRAMES);
   }
@@ -126,17 +134,48 @@ export class AudioEngine extends EventEmitter {
     return {
       config: this.config,
       status: this.status(),
-      presets: PRESETS,
+      presets: [...PRESETS, ...this.customPresets],
       devices: this.devices,
     };
   }
 
   setPreset(presetId: string): void {
-    const preset = getPreset(presetId);
+    const preset =
+      getPreset(presetId) ?? this.customPresets.find((candidate) => candidate.id === presetId);
     if (!preset) throw new Error(`Unknown preset: ${presetId}`);
     this.config.presetId = preset.id;
     this.config.effects = clampParams({ ...preset.params });
     this.dsp.setParams(this.config.effects);
+    this.scheduleSave();
+    this.emitStatus();
+  }
+
+  savePreset(name: string): void {
+    const trimmed = name.trim().slice(0, 60);
+    if (!trimmed) throw new Error("Preset name is required");
+    const preset: Preset = {
+      id: `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: trimmed,
+      tagline: "Manual preset",
+      accent: customPresetAccent(trimmed),
+      params: clampParams({ ...this.config.effects }),
+      custom: true,
+    };
+    this.customPresets.push(preset);
+    saveCustomPresets(this.customPresets);
+    this.config.presetId = preset.id;
+    this.config.effects = clampParams({ ...preset.params });
+    this.dsp.setParams(this.config.effects);
+    this.scheduleSave();
+    this.emitStatus();
+  }
+
+  deletePreset(presetId: string): void {
+    const index = this.customPresets.findIndex((preset) => preset.id === presetId);
+    if (index === -1) throw new Error(`Unknown custom preset: ${presetId}`);
+    this.customPresets.splice(index, 1);
+    saveCustomPresets(this.customPresets);
+    if (this.config.presetId === presetId) this.config.presetId = "custom";
     this.scheduleSave();
     this.emitStatus();
   }
@@ -582,5 +621,24 @@ function linearToDb(value: number): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const CUSTOM_PRESET_ACCENTS = [
+  "#f43f8f",
+  "#38bdf8",
+  "#a78bfa",
+  "#fbbf24",
+  "#a3e635",
+  "#fb7185",
+  "#22d3ee",
+  "#c084fc",
+];
+
+function customPresetAccent(name: string): string {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
+  }
+  return CUSTOM_PRESET_ACCENTS[hash % CUSTOM_PRESET_ACCENTS.length]!;
 }
 

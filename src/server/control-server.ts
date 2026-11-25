@@ -107,6 +107,12 @@ function handleMessage(engine: AudioEngine, message: ClientMessage): void {
     case "set-preset":
       engine.setPreset(message.presetId);
       break;
+    case "save-preset":
+      engine.savePreset(message.name);
+      break;
+    case "delete-preset":
+      engine.deletePreset(message.presetId);
+      break;
     case "set-output-device":
       engine.setOutputDevice(message.deviceName);
       break;

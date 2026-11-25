@@ -101,7 +101,7 @@ jobs:
         if: steps.version.outputs.bumped == 'true'
         run: npm run package:engine
 
-      - name: Build and publish GitHub release
+      - name: Build the installer and upload release assets
         if: steps.version.outputs.bumped == 'true'
         uses: tauri-apps/tauri-action@v1
         env:
@@ -115,8 +115,43 @@ jobs:
             Windows installer for Clubify ${{ steps.version.outputs.version }}.
 
             Installed copies update automatically from the latest GitHub release.
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
+          retryAttempts: 3
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           args: --bundles nsis --config src-tauri/tauri.release.conf.json
+
+      - name: Publish the release
+        if: steps.version.outputs.bumped == 'true'
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tag = "${{ steps.version.outputs.tag }}"
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
+
+          $assets = @($release.assets)
+          $installer = $assets | Where-Object { $_.name -like "*-setup.exe" }
+          $signature = $assets | Where-Object { $_.name -like "*.sig" }
+          $updater = $assets | Where-Object { $_.name -eq "latest.json" }
+          if (-not $installer -or -not $signature -or -not $updater) {
+            throw "Release $tag is missing the installer, its signature, or latest.json. Refusing to publish it."
+          }
+
+          if (-not $release.draft) {
+            Write-Output "Release $tag is already public."
+            exit 0
+          }
+
+          $body = @{ draft = $false } | ConvertTo-Json
+          Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/${{ github.repository }}/releases/$($release.id)" -Headers $headers -Body $body -ContentType "application/json" | Out-Null
+          Write-Output "Published release $tag with all assets. Installed copies can now update."

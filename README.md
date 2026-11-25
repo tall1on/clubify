@@ -21,7 +21,7 @@
 **[Download the latest version](https://github.com/tall1on/clubify/releases/latest)** and run the `Clubify_x.y.z_x64-setup.exe` installer.
 
 - **Windows 11 only** (build 20348 or newer).
-- **Updates itself.** On launch, Clubify checks for a new version and installs it automatically.
+- **Updates itself.** Clubify checks for a new version when it launches and every few hours, then installs it automatically.
 - **Starts with Windows.** It runs quietly in the system tray, near the clock. You can turn this off from the tray menu.
 - **No account needed.** Clubify never asks for your Spotify login.
 
@@ -73,7 +73,7 @@ The safety buffer defaults to 48 ms. Raise it if the machine underruns, or lower
 
 **How do I stop it starting with Windows?** Right-click the tray icon and uncheck **Start with Windows**. The choice is remembered across updates.
 
-**How do I update it?** You don't have to. Clubify updates itself automatically when it launches.
+**How do I update it?** You don't have to. Clubify checks for updates when it launches and every few hours, and installs them automatically.
 
 **How do I uninstall it?** Open Windows **Settings → Apps → Installed apps**, find Clubify, and uninstall. Then set Spotify's output device back to your normal speakers.
 

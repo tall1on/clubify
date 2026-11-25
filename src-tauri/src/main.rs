@@ -2,12 +2,13 @@
 
 use std::{
     env,
+    fs::OpenOptions,
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
@@ -22,6 +23,8 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_updater::UpdaterExt;
 
 const ENGINE_PORT: u16 = 8787;
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const UPDATE_LOG_LIMIT_BYTES: u64 = 256 * 1024;
 
 struct EngineState(Mutex<Option<Child>>);
 struct Quitting(Mutex<bool>);
@@ -162,39 +165,122 @@ fn spawn_update_check(app: tauri::AppHandle) {
         return;
     }
 
-    tauri::async_runtime::spawn(async move {
-        let stop_handle = app.clone();
-        let updater = match app
-            .updater_builder()
-            .timeout(Duration::from_secs(30))
-            .on_before_exit(move || stop_engine(&stop_handle))
-            .build()
-        {
-            Ok(updater) => updater,
-            Err(error) => {
-                eprintln!("[clubify] updater unavailable: {error}");
+    std::thread::spawn(move || loop {
+        check_for_update(&app);
+        std::thread::sleep(update_check_interval());
+    });
+}
+
+fn check_for_update(app: &tauri::AppHandle) {
+    let stop_handle = app.clone();
+    let updater = match app
+        .updater_builder()
+        .timeout(Duration::from_secs(30))
+        .on_before_exit(move || stop_engine(&stop_handle))
+        .build()
+    {
+        Ok(updater) => updater,
+        Err(error) => {
+            log_update(app, &format!("updater unavailable: {error}"));
+            return;
+        }
+    };
+
+    let current_version = app.package_info().version.clone();
+    log_update(
+        app,
+        &format!("checking for updates (current {current_version})"),
+    );
+
+    match tauri::async_runtime::block_on(updater.check()) {
+        Ok(Some(update)) => {
+            log_update(
+                app,
+                &format!(
+                    "installing update {} (current {})",
+                    update.version, update.current_version
+                ),
+            );
+            let install =
+                tauri::async_runtime::block_on(update.download_and_install(|_, _| {}, || {}));
+            if let Err(error) = install {
+                log_update(
+                    app,
+                    &format!("update to {} failed: {error}", update.version),
+                );
+                spawn_engine(app);
                 return;
             }
-        };
-
-        match updater.check().await {
-            Ok(Some(update)) => {
-                eprintln!(
-                    "[clubify] installing update {} (current {})",
-                    update.version, update.current_version
-                );
-                if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
-                    eprintln!("[clubify] update failed: {error}");
-                    spawn_engine(&app);
-                    return;
-                }
-                #[cfg(not(windows))]
-                app.restart();
-            }
-            Ok(None) => eprintln!("[clubify] no update available"),
-            Err(error) => eprintln!("[clubify] update check failed: {error}"),
+            #[cfg(not(windows))]
+            app.restart();
         }
-    });
+        Ok(None) => log_update(
+            app,
+            &format!("no update available (current {current_version})"),
+        ),
+        Err(error) => log_update(app, &format!("update check failed: {error}")),
+    }
+}
+
+fn update_check_interval() -> Duration {
+    env::var("CLUBIFY_UPDATE_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(UPDATE_CHECK_INTERVAL)
+}
+
+fn log_update(app: &tauri::AppHandle, message: &str) {
+    eprintln!("[clubify] {message}");
+
+    let Ok(log_dir) = app.path().app_log_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let path = log_dir.join("updater.log");
+    let oversized = std::fs::metadata(&path)
+        .map(|metadata| metadata.len() > UPDATE_LOG_LIMIT_BYTES)
+        .unwrap_or(false);
+    if oversized {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{} {message}", utc_timestamp());
+    }
+}
+
+fn utc_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let days = (seconds / 86_400) as i64;
+    let clock = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        clock / 3_600,
+        clock % 3_600 / 60,
+        clock % 60
+    )
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
+    let shifted = days_since_unix_epoch + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = month_index + if month_index < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year, month as u32, day as u32)
 }
 
 fn spawn_engine(app: &tauri::AppHandle) {

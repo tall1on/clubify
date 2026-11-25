@@ -155,6 +155,10 @@ Open http://127.0.0.1:8787 to control the engine from the browser.
 
 ## License
 
-Clubify is released under the [MIT License](LICENSE). Copyright (c) 2026 Luke Grandke.
+Clubify is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License v3.0](LICENSE) (**GPL-3.0-only**). Copyright (C) 2026 Luke Grandke.
+
+This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [LICENSE](LICENSE) file for the full terms.
+
+Source code: <https://github.com/tall1on/clubify>
 
 The app includes a **Licenses & third-party notices** panel with the project license and the full texts of bundled dependencies. It is generated from the installed npm tree and the Cargo dependency graph by `npm run licenses:generate`, which also runs before every UI or desktop build.

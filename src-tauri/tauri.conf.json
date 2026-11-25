@@ -42,7 +42,7 @@
     "active": true,
     "targets": "all",
     "publisher": "Luke Grandke",
-    "copyright": "Copyright (c) 2026 Luke Grandke",
+    "copyright": "Copyright (C) 2026 Luke Grandke",
     "licenseFile": "../LICENSE",
     "resources": {
       "../LICENSE": "LICENSE",

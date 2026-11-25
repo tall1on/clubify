@@ -15,6 +15,7 @@ export interface ProjectLicense {
   version: string;
   license: string;
   copyright: string;
+  homepage?: string;
   text: string;
 }
 

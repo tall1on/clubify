@@ -445,7 +445,7 @@ function main() {
 
   const licenseText = normalizeText(readFileSync(join(root, "LICENSE"), "utf8"));
   const copyright =
-    licenseText.match(/^Copyright \(c\).+$/m)?.[0] ??
+    licenseText.match(/^Copyright \(c\).+$/im)?.[0] ??
     `Copyright (c) ${new Date().getFullYear()} ${packageJson.author ?? ""}`.trim();
 
   const sortedPackages = [...packages.values()].sort((left, right) => {
@@ -459,15 +459,16 @@ function main() {
 
   const output = {
     generator: "scripts/generate-licenses.mjs",
-    sources: ["LICENSE", "package-lock.json", "Cargo.lock", "licenses/overrides"],
+    sources: ["LICENSE", "package.json", "package-lock.json", "Cargo.lock", "licenses/overrides"],
     note:
       "Generated file. Do not edit by hand. Run `npm run licenses:generate` to refresh " +
       "after changing npm or Cargo dependencies.",
     project: {
       name: "Clubify",
       version: packageJson.version,
-      license: licenseValue(packageJson.license) ?? "MIT",
+      license: licenseValue(packageJson.license) ?? "GPL-3.0-only",
       copyright,
+      homepage: homepageValue(packageJson),
       text: licenseText,
     },
     packages: sortedPackages,

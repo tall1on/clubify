@@ -33,6 +33,17 @@ function onToggle(event: Event) {
 const packages = computed(() => data.value?.packages ?? []);
 const project = computed(() => data.value?.project ?? null);
 
+const PROJECT_LICENSE_LABELS: Record<string, string> = {
+  "GPL-3.0-only": "GPLv3",
+  "GPL-3.0-or-later": "GPLv3 or later",
+};
+
+const projectLicenseLabel = computed(() => {
+  const license = project.value?.license;
+  if (!license) return "";
+  return PROJECT_LICENSE_LABELS[license] ?? license;
+});
+
 const filteredPackages = computed(() => {
   const needle = query.value.trim().toLowerCase();
   if (!needle) return packages.value;
@@ -88,17 +99,19 @@ function onEntryToggle(entry: LicensePackage, event: Event) {
         <div class="section-heading">
           <div>
             <p class="eyebrow">PROJECT LICENSE</p>
-            <h3 v-if="project">{{ project.name }} is {{ project.license }} licensed</h3>
+            <h3 v-if="project">{{ project.name }} is {{ projectLicenseLabel }} licensed</h3>
             <h3 v-else>Project license</h3>
           </div>
-          <span class="fine-print">{{ project?.copyright ?? "MIT License" }}</span>
+          <span class="fine-print">{{ project?.copyright ?? "See LICENSE" }}</span>
         </div>
         <template v-if="project">
           <p class="license-intro">
-            Clubify is distributed under the {{ project.license }} license. The full text below
+            Clubify is free software distributed under the {{ projectLicenseLabel }} license.
+            It comes with no warranty, to the extent permitted by law. The full text below
             governs use, copying, modification, and distribution of the project.
           </p>
           <pre class="license-text">{{ project.text }}</pre>
+          <p v-if="project.homepage" class="license-source">Source: {{ project.homepage }}</p>
         </template>
         <p v-else-if="loadError" class="error-text">{{ loadError }}</p>
         <p v-else class="fine-print">
